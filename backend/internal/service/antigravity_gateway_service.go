@@ -22,6 +22,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -134,6 +135,7 @@ type antigravityRetryLoopParams struct {
 	body            []byte
 	c               *gin.Context
 	httpUpstream    HTTPUpstream
+	tlsProfile      *tlsfingerprint.Profile // TLS fingerprint profile for upstream connections
 	settingService  *SettingService
 	accountRepo     AccountRepository // 用于智能重试的模型级别限流
 	handleError     func(ctx context.Context, prefix string, account *Account, statusCode int, headers http.Header, body []byte, requestedModel string, groupID int64, sessionHash string, isStickySession bool) *handleModelRateLimitResult
@@ -305,7 +307,7 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 				}
 			}
 
-			retryResp, retryErr := p.httpUpstream.Do(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency)
+			retryResp, retryErr := p.httpUpstream.DoWithTLS(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency, p.tlsProfile)
 			if retryErr == nil && retryResp != nil && retryResp.StatusCode != http.StatusTooManyRequests && retryResp.StatusCode != http.StatusServiceUnavailable {
 				log.Printf("%s status=%d smart_retry_success attempt=%d/%d", p.prefix, retryResp.StatusCode, attempt, maxAttempts)
 				// 重试成功，清除 MODEL_CAPACITY_EXHAUSTED cooldown
@@ -490,7 +492,7 @@ func (s *AntigravityGatewayService) handleSingleAccountRetryInPlace(
 			break
 		}
 
-		retryResp, retryErr := p.httpUpstream.Do(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency)
+		retryResp, retryErr := p.httpUpstream.DoWithTLS(retryReq, p.proxyURL, p.account.ID, p.account.Concurrency, p.tlsProfile)
 		if retryErr == nil && retryResp != nil && retryResp.StatusCode != http.StatusTooManyRequests && retryResp.StatusCode != http.StatusServiceUnavailable {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d single_account_503_retry_success attempt=%d/%d total_waited=%v",
 				p.prefix, retryResp.StatusCode, attempt, antigravitySingleAccountSmartRetryMaxAttempts, totalWaited)
@@ -633,7 +635,7 @@ urlFallbackLoop:
 				p.c.Set(OpsUpstreamRequestBodyKey, string(p.body))
 			}
 
-			resp, err = p.httpUpstream.Do(upstreamReq, p.proxyURL, p.account.ID, p.account.Concurrency)
+			resp, err = p.httpUpstream.DoWithTLS(upstreamReq, p.proxyURL, p.account.ID, p.account.Concurrency, p.tlsProfile)
 			if err == nil && resp == nil {
 				err = errors.New("upstream returned nil response")
 			}
@@ -1074,6 +1076,7 @@ func (s *AntigravityGatewayService) TestConnection(ctx context.Context, account 
 		body:           requestBody,
 		c:              nil, // 无 gin.Context → 跳过 ops 追踪
 		httpUpstream:   s.httpUpstream,
+		tlsProfile:     tlsfingerprint.AntigravityRealProfile,
 		settingService: s.settingService,
 		accountRepo:    s.accountRepo,
 		requestedModel: modelID,
@@ -1421,6 +1424,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		body:            geminiBody,
 		c:               c,
 		httpUpstream:    s.httpUpstream,
+		tlsProfile:      tlsfingerprint.AntigravityRealProfile,
 		settingService:  s.settingService,
 		accountRepo:     s.accountRepo,
 		handleError:     s.handleUpstreamError,
@@ -1505,6 +1509,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					body:            retryGeminiBody,
 					c:               c,
 					httpUpstream:    s.httpUpstream,
+					tlsProfile:      tlsfingerprint.AntigravityRealProfile,
 					settingService:  s.settingService,
 					accountRepo:     s.accountRepo,
 					handleError:     s.handleUpstreamError,
@@ -1627,6 +1632,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 							body:            retryGeminiBody,
 							c:               c,
 							httpUpstream:    s.httpUpstream,
+							tlsProfile:      tlsfingerprint.AntigravityRealProfile,
 							settingService:  s.settingService,
 							accountRepo:     s.accountRepo,
 							handleError:     s.handleUpstreamError,
@@ -2176,6 +2182,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		body:            wrappedBody,
 		c:               c,
 		httpUpstream:    s.httpUpstream,
+		tlsProfile:      tlsfingerprint.AntigravityRealProfile,
 		settingService:  s.settingService,
 		accountRepo:     s.accountRepo,
 		handleError:     s.handleUpstreamError,
@@ -2275,6 +2282,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 					body:            retryWrappedBody,
 					c:               c,
 					httpUpstream:    s.httpUpstream,
+					tlsProfile:      tlsfingerprint.AntigravityRealProfile,
 					settingService:  s.settingService,
 					accountRepo:     s.accountRepo,
 					handleError:     s.handleUpstreamError,
