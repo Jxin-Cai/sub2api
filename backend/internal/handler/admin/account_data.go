@@ -68,6 +68,7 @@ type DataImportResult struct {
 	ProxyReused    int               `json:"proxy_reused"`
 	ProxyFailed    int               `json:"proxy_failed"`
 	AccountCreated int               `json:"account_created"`
+	AccountSkipped int               `json:"account_skipped"`
 	AccountFailed  int               `json:"account_failed"`
 	Errors         []DataImportError `json:"errors,omitempty"`
 }
@@ -271,6 +272,16 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	// 收集需要异步设置隐私的 Antigravity OAuth 账号
 	var privacyAccounts []*service.Account
 
+	// 构建现有账号名称集合，用于导入时跳过重名账号
+	existingAccounts, err := h.listAccountsFiltered(ctx, "", "", "", "", 0, "", "name", "asc")
+	if err != nil {
+		return result, err
+	}
+	existingNames := make(map[string]struct{}, len(existingAccounts))
+	for _, acc := range existingAccounts {
+		existingNames[acc.Name] = struct{}{}
+	}
+
 	for i := range dataPayload.Accounts {
 		item := dataPayload.Accounts[i]
 		if err := validateDataAccount(item); err != nil {
@@ -280,6 +291,11 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 				Name:    item.Name,
 				Message: err.Error(),
 			})
+			continue
+		}
+
+		if _, exists := existingNames[item.Name]; exists {
+			result.AccountSkipped++
 			continue
 		}
 
@@ -332,6 +348,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		if created.Platform == service.PlatformAntigravity && created.Type == service.AccountTypeOAuth {
 			privacyAccounts = append(privacyAccounts, created)
 		}
+		existingNames[item.Name] = struct{}{}
 		result.AccountCreated++
 	}
 

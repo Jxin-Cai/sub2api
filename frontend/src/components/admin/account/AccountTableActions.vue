@@ -6,6 +6,7 @@
     </button>
     <slot name="after"></slot>
     <button @click="$emit('sync')" class="btn btn-secondary">{{ t('admin.accounts.syncFromCrs') }}</button>
+    <button @click="$emit('dedup')" class="btn btn-secondary">{{ t('admin.accounts.dedup') }}</button>
     <slot name="beforeCreate"></slot>
     <button @click="$emit('create')" class="btn btn-primary">{{ t('admin.accounts.createAccount') }}</button>
     <slot name="afterCreate"></slot>
@@ -17,7 +18,7 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 
 defineProps(['loading'])
-defineEmits(['refresh', 'sync', 'create'])
+defineEmits(['refresh', 'sync', 'create', 'dedup'])
 
 const { t } = useI18n()
 </script>

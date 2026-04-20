@@ -627,6 +627,32 @@ export async function setPrivacy(id: number): Promise<Account> {
   return data
 }
 
+export interface DedupDuplicateGroup {
+  name: string
+  keep_id: number
+  remove_ids: number[]
+  count: number
+}
+
+export interface DedupPreviewResult {
+  duplicates: DedupDuplicateGroup[]
+  total_remove: number
+}
+
+export interface DedupExecuteResult {
+  removed: number
+}
+
+export async function dedupPreview(): Promise<DedupPreviewResult> {
+  const { data } = await apiClient.post<DedupPreviewResult>('/admin/accounts/dedup/preview')
+  return data
+}
+
+export async function dedupExecute(): Promise<DedupExecuteResult> {
+  const { data } = await apiClient.post<DedupExecuteResult>('/admin/accounts/dedup')
+  return data
+}
+
 export const accountsAPI = {
   list,
   listWithEtag,
@@ -663,7 +689,9 @@ export const accountsAPI = {
   getAntigravityDefaultModelMapping,
   batchClearError,
   batchRefresh,
-  setPrivacy
+  setPrivacy,
+  dedupPreview,
+  dedupExecute
 }
 
 export default accountsAPI
