@@ -3,7 +3,6 @@
     :show="show"
     :title="t('admin.accounts.dedupTitle')"
     width="normal"
-    close-on-click-outside
     @close="handleClose"
   >
     <div class="space-y-4">
@@ -55,7 +54,7 @@
 
     <template #footer>
       <div class="flex justify-end gap-3">
-        <button class="btn btn-secondary" type="button" :disabled="executing" @click="handleClose">
+        <button class="btn btn-secondary" type="button" :disabled="loading || executing" @click="handleClose">
           {{ t('common.cancel') }}
         </button>
         <button
@@ -125,7 +124,7 @@ watch(
 )
 
 const handleClose = () => {
-  if (executing.value) return
+  if (loading.value || executing.value) return
   if (result.value) {
     emit('deduped')
   }

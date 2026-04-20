@@ -122,7 +122,7 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import Select from './Select.vue'
-import { getConfiguredTablePageSizeOptions, normalizeTablePageSize } from '@/utils/tablePreferences'
+import { getConfiguredTablePageSizeOptions, normalizeTablePageSize, DEFAULT_TABLE_PAGE_SIZE_OPTIONS } from '@/utils/tablePreferences'
 
 const { t } = useI18n()
 
@@ -163,6 +163,7 @@ const toItem = computed(() => {
 const pageSizeSelectOptions = computed(() => {
   const options = Array.from(
     new Set([
+      ...DEFAULT_TABLE_PAGE_SIZE_OPTIONS,
       ...getConfiguredTablePageSizeOptions(),
       normalizeTablePageSize(props.pageSize)
     ])

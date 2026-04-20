@@ -942,7 +942,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyPurchaseSubscriptionEnabled:      "false",
 		SettingKeyPurchaseSubscriptionURL:          "",
 		SettingKeyTableDefaultPageSize:             "20",
-		SettingKeyTablePageSizeOptions:             "[10,20,50,100]",
+		SettingKeyTablePageSizeOptions:             "[20,50,100,500,1000,5000]",
 		SettingKeyCustomMenuItems:                  "[]",
 		SettingKeyCustomEndpoints:                  "[]",
 		SettingKeyOIDCConnectEnabled:               "false",
@@ -1333,7 +1333,7 @@ func parseTablePreferences(defaultPageSizeRaw, optionsRaw string) (int, []int) {
 
 func normalizeTablePreferences(defaultPageSize int, options []int) (int, []int) {
 	const minPageSize = 5
-	const maxPageSize = 1000
+	const maxPageSize = 5000
 	const fallbackPageSize = 20
 
 	seen := make(map[int]struct{}, len(options))
@@ -1355,7 +1355,7 @@ func normalizeTablePreferences(defaultPageSize int, options []int) (int, []int) 
 	}
 
 	if len(normalizedOptions) == 0 {
-		normalizedOptions = []int{10, 20, 50}
+		normalizedOptions = []int{20, 50, 100, 500, 1000, 5000}
 	}
 
 	return defaultPageSize, normalizedOptions
