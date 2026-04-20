@@ -3,6 +3,7 @@
     :show="show"
     :title="t('admin.accounts.dedupTitle')"
     width="normal"
+    :close-on-escape="!loading && !executing"
     @close="handleClose"
   >
     <div class="space-y-4">
