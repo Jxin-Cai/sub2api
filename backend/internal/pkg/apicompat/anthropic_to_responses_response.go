@@ -58,7 +58,7 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 			outputs = append(outputs, ResponsesOutput{
 				Type:      "function_call",
 				ID:        generateItemID(),
-				CallID:    toResponsesCallID(block.ID),
+				CallID:    block.ID,
 				Name:      block.Name,
 				Arguments: args,
 				Status:    "completed",
@@ -281,7 +281,7 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 
 		state.CurrentItemID = generateItemID()
 		state.CurrentItemType = "function_call"
-		state.CurrentCallID = toResponsesCallID(evt.ContentBlock.ID)
+		state.CurrentCallID = evt.ContentBlock.ID
 		state.CurrentName = evt.ContentBlock.Name
 
 		events = append(events, makeResponsesEvent(state, "response.output_item.added", &ResponsesStreamEvent{

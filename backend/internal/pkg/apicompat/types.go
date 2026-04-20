@@ -24,6 +24,8 @@ type AnthropicRequest struct {
 	Thinking     *AnthropicThinking     `json:"thinking,omitempty"`
 	ToolChoice   json.RawMessage        `json:"tool_choice,omitempty"`
 	OutputConfig *AnthropicOutputConfig `json:"output_config,omitempty"`
+	ServiceTier  string                 `json:"service_tier,omitempty"`
+	Metadata     json.RawMessage        `json:"metadata,omitempty"`
 }
 
 // AnthropicOutputConfig controls output generation parameters.
@@ -51,7 +53,8 @@ type AnthropicContentBlock struct {
 	Text string `json:"text,omitempty"`
 
 	// type=thinking
-	Thinking string `json:"thinking,omitempty"`
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
 
 	// type=image
 	Source *AnthropicImageSource `json:"source,omitempty"`
@@ -122,6 +125,15 @@ type AnthropicStreamEvent struct {
 
 	// message_delta
 	Usage *AnthropicUsage `json:"usage,omitempty"`
+
+	// error
+	Error *AnthropicErrorDetail `json:"error,omitempty"`
+}
+
+// AnthropicErrorDetail describes an error in a streaming error event.
+type AnthropicErrorDetail struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
 }
 
 // AnthropicDelta carries incremental content in streaming events.
@@ -151,19 +163,22 @@ type AnthropicDelta struct {
 
 // ResponsesRequest is the request body for POST /v1/responses.
 type ResponsesRequest struct {
-	Model           string              `json:"model"`
-	Instructions    string              `json:"instructions,omitempty"`
-	Input           json.RawMessage     `json:"input"` // string or []ResponsesInputItem
-	MaxOutputTokens *int                `json:"max_output_tokens,omitempty"`
-	Temperature     *float64            `json:"temperature,omitempty"`
-	TopP            *float64            `json:"top_p,omitempty"`
-	Stream          bool                `json:"stream,omitempty"`
-	Tools           []ResponsesTool     `json:"tools,omitempty"`
-	Include         []string            `json:"include,omitempty"`
-	Store           *bool               `json:"store,omitempty"`
-	Reasoning       *ResponsesReasoning `json:"reasoning,omitempty"`
-	ToolChoice      json.RawMessage     `json:"tool_choice,omitempty"`
-	ServiceTier     string              `json:"service_tier,omitempty"`
+	Model             string              `json:"model"`
+	Instructions      string              `json:"instructions,omitempty"`
+	Input             json.RawMessage     `json:"input"` // string or []ResponsesInputItem
+	MaxOutputTokens   *int                `json:"max_output_tokens,omitempty"`
+	Temperature       *float64            `json:"temperature,omitempty"`
+	TopP              *float64            `json:"top_p,omitempty"`
+	Stream            bool                `json:"stream,omitempty"`
+	Tools             []ResponsesTool     `json:"tools,omitempty"`
+	Include           []string            `json:"include,omitempty"`
+	Store             *bool               `json:"store,omitempty"`
+	Reasoning         *ResponsesReasoning `json:"reasoning,omitempty"`
+	ToolChoice        json.RawMessage     `json:"tool_choice,omitempty"`
+	ServiceTier       string              `json:"service_tier,omitempty"`
+	ParallelToolCalls *bool               `json:"parallel_tool_calls,omitempty"`
+	Metadata          json.RawMessage     `json:"metadata,omitempty"`
+	PromptCacheKey    string              `json:"prompt_cache_key,omitempty"`
 }
 
 // ResponsesReasoning configures reasoning effort in the Responses API.
@@ -187,9 +202,14 @@ type ResponsesInputItem struct {
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
 	ID        string `json:"id,omitempty"`
+	Status    string `json:"status,omitempty"` // "completed" | "incomplete"
 
 	// type=function_call_output
 	Output string `json:"output,omitempty"`
+
+	// type=reasoning
+	Summary          []ResponsesSummary `json:"summary,omitempty"`
+	EncryptedContent string             `json:"encrypted_content,omitempty"`
 }
 
 // ResponsesContentPart is a typed content part in a Responses message.
@@ -482,3 +502,7 @@ type ChatDelta struct {
 // minMaxOutputTokens is the floor for max_output_tokens in a Responses request.
 // Very small values may cause upstream API errors, so we enforce a minimum.
 const minMaxOutputTokens = 128
+
+// minAnthropicMaxOutputTokens is the floor for max_output_tokens when converting
+// Anthropic requests to Responses API. Claude Code expects a higher minimum.
+const minAnthropicMaxOutputTokens = 12800

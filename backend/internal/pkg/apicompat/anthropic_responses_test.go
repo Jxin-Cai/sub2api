@@ -26,7 +26,7 @@ func TestAnthropicToResponses_BasicText(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "gpt-5.2", resp.Model)
 	assert.True(t, resp.Stream)
-	assert.Equal(t, 1024, *resp.MaxOutputTokens)
+	assert.Equal(t, 12800, *resp.MaxOutputTokens)
 	assert.False(t, *resp.Store)
 
 	var items []ResponsesInputItem
@@ -46,10 +46,12 @@ func TestAnthropicToResponses_SystemPrompt(t *testing.T) {
 		resp, err := AnthropicToResponses(req)
 		require.NoError(t, err)
 
+		assert.Equal(t, "You are helpful.", resp.Instructions)
+
 		var items []ResponsesInputItem
 		require.NoError(t, json.Unmarshal(resp.Input, &items))
-		require.Len(t, items, 2)
-		assert.Equal(t, "system", items[0].Role)
+		require.Len(t, items, 1)
+		assert.Equal(t, "user", items[0].Role)
 	})
 
 	t.Run("array", func(t *testing.T) {
@@ -62,14 +64,12 @@ func TestAnthropicToResponses_SystemPrompt(t *testing.T) {
 		resp, err := AnthropicToResponses(req)
 		require.NoError(t, err)
 
+		assert.Equal(t, "Part 1\n\nPart 2", resp.Instructions)
+
 		var items []ResponsesInputItem
 		require.NoError(t, json.Unmarshal(resp.Input, &items))
-		require.Len(t, items, 2)
-		assert.Equal(t, "system", items[0].Role)
-		// System text should be joined with double newline.
-		var text string
-		require.NoError(t, json.Unmarshal(items[0].Content, &text))
-		assert.Equal(t, "Part 1\n\nPart 2", text)
+		require.Len(t, items, 1)
+		assert.Equal(t, "user", items[0].Role)
 	})
 }
 
@@ -104,10 +104,10 @@ func TestAnthropicToResponses_ToolUse(t *testing.T) {
 	assert.Equal(t, "user", items[0].Role)
 	assert.Equal(t, "assistant", items[1].Role)
 	assert.Equal(t, "function_call", items[2].Type)
-	assert.Equal(t, "fc_call_1", items[2].CallID)
+	assert.Equal(t, "call_1", items[2].CallID)
 	assert.Empty(t, items[2].ID)
 	assert.Equal(t, "function_call_output", items[3].Type)
-	assert.Equal(t, "fc_call_1", items[3].CallID)
+	assert.Equal(t, "call_1", items[3].CallID)
 	assert.Equal(t, "Sunny, 72°F", items[3].Output)
 }
 
@@ -141,13 +141,13 @@ func TestAnthropicToResponses_ThinkingIgnored(t *testing.T) {
 func TestAnthropicToResponses_MaxTokensFloor(t *testing.T) {
 	req := &AnthropicRequest{
 		Model:     "gpt-5.2",
-		MaxTokens: 10, // below minMaxOutputTokens (128)
+		MaxTokens: 10, // below minAnthropicMaxOutputTokens (12800)
 		Messages:  []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
 	}
 
 	resp, err := AnthropicToResponses(req)
 	require.NoError(t, err)
-	assert.Equal(t, 128, *resp.MaxOutputTokens)
+	assert.Equal(t, 12800, *resp.MaxOutputTokens)
 }
 
 // ---------------------------------------------------------------------------
@@ -563,14 +563,12 @@ func TestStreamingFailed(t *testing.T) {
 		},
 	}, state)
 
-	// Should close text block + message_delta + message_stop
-	require.Len(t, events, 3)
+	// Should close text block + error event
+	require.Len(t, events, 2)
 	assert.Equal(t, "content_block_stop", events[0].Type)
-	assert.Equal(t, "message_delta", events[1].Type)
-	assert.Equal(t, "end_turn", events[1].Delta.StopReason)
-	assert.Equal(t, 50, events[1].Usage.InputTokens)
-	assert.Equal(t, 10, events[1].Usage.OutputTokens)
-	assert.Equal(t, "message_stop", events[2].Type)
+	assert.Equal(t, "error", events[1].Type)
+	assert.Equal(t, "api_error", events[1].Error.Type)
+	assert.Equal(t, "Internal error", events[1].Error.Message)
 }
 
 func TestStreamingFailedNoOutput(t *testing.T) {
@@ -592,11 +590,10 @@ func TestStreamingFailedNoOutput(t *testing.T) {
 		},
 	}, state)
 
-	// Should emit message_delta + message_stop (no block to close)
-	require.Len(t, events, 2)
-	assert.Equal(t, "message_delta", events[0].Type)
-	assert.Equal(t, "end_turn", events[0].Delta.StopReason)
-	assert.Equal(t, "message_stop", events[1].Type)
+	// Should emit error event (no block to close)
+	require.Len(t, events, 1)
+	assert.Equal(t, "error", events[0].Type)
+	assert.Equal(t, "Too many requests", events[0].Error.Message)
 }
 
 func TestResponsesToAnthropic_Failed(t *testing.T) {
@@ -634,7 +631,7 @@ func TestAnthropicToResponses_ThinkingEnabled(t *testing.T) {
 	require.NotNil(t, resp.Reasoning)
 	// thinking.type is ignored for effort; default high applies.
 	assert.Equal(t, "high", resp.Reasoning.Effort)
-	assert.Equal(t, "auto", resp.Reasoning.Summary)
+	assert.Equal(t, "detailed", resp.Reasoning.Summary)
 	assert.Contains(t, resp.Include, "reasoning.encrypted_content")
 	assert.NotContains(t, resp.Include, "reasoning.summary")
 }
@@ -652,7 +649,7 @@ func TestAnthropicToResponses_ThinkingAdaptive(t *testing.T) {
 	require.NotNil(t, resp.Reasoning)
 	// thinking.type is ignored for effort; default high applies.
 	assert.Equal(t, "high", resp.Reasoning.Effort)
-	assert.Equal(t, "auto", resp.Reasoning.Summary)
+	assert.Equal(t, "detailed", resp.Reasoning.Summary)
 	assert.NotContains(t, resp.Include, "reasoning.summary")
 }
 
@@ -703,7 +700,7 @@ func TestAnthropicToResponses_OutputConfigOverridesDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp.Reasoning)
 	assert.Equal(t, "low", resp.Reasoning.Effort)
-	assert.Equal(t, "auto", resp.Reasoning.Summary)
+	assert.Equal(t, "detailed", resp.Reasoning.Summary)
 }
 
 func TestAnthropicToResponses_OutputConfigWithoutThinking(t *testing.T) {
@@ -720,7 +717,7 @@ func TestAnthropicToResponses_OutputConfigWithoutThinking(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp.Reasoning)
 	assert.Equal(t, "medium", resp.Reasoning.Effort)
-	assert.Equal(t, "auto", resp.Reasoning.Summary)
+	assert.Equal(t, "detailed", resp.Reasoning.Summary)
 }
 
 func TestAnthropicToResponses_OutputConfigHigh(t *testing.T) {
@@ -736,7 +733,7 @@ func TestAnthropicToResponses_OutputConfigHigh(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp.Reasoning)
 	assert.Equal(t, "high", resp.Reasoning.Effort)
-	assert.Equal(t, "auto", resp.Reasoning.Summary)
+	assert.Equal(t, "detailed", resp.Reasoning.Summary)
 }
 
 func TestAnthropicToResponses_OutputConfigMax(t *testing.T) {
@@ -752,7 +749,7 @@ func TestAnthropicToResponses_OutputConfigMax(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp.Reasoning)
 	assert.Equal(t, "xhigh", resp.Reasoning.Effort)
-	assert.Equal(t, "auto", resp.Reasoning.Summary)
+	assert.Equal(t, "detailed", resp.Reasoning.Summary)
 }
 
 func TestAnthropicToResponses_NoOutputConfig(t *testing.T) {
@@ -923,7 +920,7 @@ func TestAnthropicToResponses_ToolResultWithImage(t *testing.T) {
 
 	// function_call_output should have text-only output (no image).
 	assert.Equal(t, "function_call_output", items[2].Type)
-	assert.Equal(t, "fc_toolu_1", items[2].CallID)
+	assert.Equal(t, "toolu_1", items[2].CallID)
 	assert.Equal(t, "(empty)", items[2].Output)
 
 	// Image should be in a separate user message.

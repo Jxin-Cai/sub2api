@@ -307,18 +307,8 @@ func convertResponsesAssistantToAnthropicContent(raw json.RawMessage) (json.RawM
 }
 
 // fromResponsesCallIDToAnthropic converts an OpenAI function call ID back to
-// Anthropic format. Reverses toResponsesCallID.
+// Anthropic format. IDs are passed through as-is since we no longer add prefixes.
 func fromResponsesCallIDToAnthropic(id string) string {
-	// If it has our "fc_" prefix wrapping a known Anthropic prefix, strip it
-	if after, ok := strings.CutPrefix(id, "fc_"); ok {
-		if strings.HasPrefix(after, "toolu_") || strings.HasPrefix(after, "call_") {
-			return after
-		}
-	}
-	// Generate a synthetic Anthropic tool ID
-	if !strings.HasPrefix(id, "toolu_") && !strings.HasPrefix(id, "call_") {
-		return "toolu_" + id
-	}
 	return id
 }
 

@@ -11,7 +11,7 @@ import (
 // Chat Completions intermediary round-trip (e.g. thinking, cache_control,
 // structured system prompts).
 func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
-	input, err := convertAnthropicToResponsesInput(req.System, req.Messages)
+	input, err := convertAnthropicToResponsesInput(nil, req.Messages)
 	if err != nil {
 		return nil, err
 	}
@@ -21,44 +21,57 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 		return nil, err
 	}
 
+	// System prompt → instructions field (not input item)
+	instructions := ""
+	if len(req.System) > 0 {
+		instructions, err = parseAnthropicSystemPrompt(req.System)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	tempOne := 1.0
 	out := &ResponsesRequest{
-		Model:       req.Model,
-		Input:       inputJSON,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
-		Stream:      req.Stream,
-		Include:     []string{"reasoning.encrypted_content"},
+		Model:        req.Model,
+		Instructions: instructions,
+		Input:        inputJSON,
+		Temperature:  &tempOne,
+		TopP:         req.TopP,
+		Stream:       req.Stream,
+		Include:      []string{"reasoning.encrypted_content"},
 	}
 
 	storeFalse := false
 	out.Store = &storeFalse
 
+	parallelTrue := true
+	out.ParallelToolCalls = &parallelTrue
+
 	if req.MaxTokens > 0 {
 		v := req.MaxTokens
-		if v < minMaxOutputTokens {
-			v = minMaxOutputTokens
+		if v < minAnthropicMaxOutputTokens {
+			v = minAnthropicMaxOutputTokens
 		}
 		out.MaxOutputTokens = &v
+	}
+
+	if len(req.Metadata) > 0 {
+		out.Metadata = req.Metadata
 	}
 
 	if len(req.Tools) > 0 {
 		out.Tools = convertAnthropicToolsToResponses(req.Tools)
 	}
 
-	// Determine reasoning effort: only output_config.effort controls the
-	// level; thinking.type is ignored. Default is high when unset (both
-	// Anthropic and OpenAI default to high).
-	// Anthropic levels map 1:1 to OpenAI: low→low, medium→medium, high→high, max→xhigh.
-	effort := "high" // default → both sides' default
+	effort := "high"
 	if req.OutputConfig != nil && req.OutputConfig.Effort != "" {
 		effort = req.OutputConfig.Effort
 	}
 	out.Reasoning = &ResponsesReasoning{
 		Effort:  mapAnthropicEffortToResponses(effort),
-		Summary: "auto",
+		Summary: "detailed",
 	}
 
-	// Convert tool_choice
 	if len(req.ToolChoice) > 0 {
 		tc, err := convertAnthropicToolChoiceToResponses(req.ToolChoice)
 		if err != nil {
@@ -195,7 +208,7 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 		outputText, imageParts := convertToolResultOutput(b)
 		out = append(out, ResponsesInputItem{
 			Type:   "function_call_output",
-			CallID: toResponsesCallID(b.ToolUseID),
+			CallID: b.ToolUseID,
 			Output: outputText,
 		})
 		toolResultImageParts = append(toolResultImageParts, imageParts...)
@@ -232,7 +245,7 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 // anthropicAssistantToResponses handles an Anthropic assistant message.
 // Text content → assistant message with output_text parts.
 // tool_use blocks → function_call items.
-// thinking blocks → ignored (OpenAI doesn't accept them as input).
+// thinking blocks with signature → reasoning or compaction items.
 func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, error) {
 	// Try plain string.
 	var s string
@@ -251,59 +264,139 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 	}
 
 	var items []ResponsesInputItem
+	var textParts []ResponsesContentPart
 
-	// Text content → assistant message with output_text content parts.
-	text := extractAnthropicTextFromBlocks(blocks)
-	if text != "" {
-		parts := []ResponsesContentPart{{Type: "output_text", Text: text}}
-		partsJSON, err := json.Marshal(parts)
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if b.Text != "" {
+				textParts = append(textParts, ResponsesContentPart{Type: "output_text", Text: b.Text})
+			}
+		case "tool_use":
+			// Flush pending text before tool_use
+			if len(textParts) > 0 {
+				partsJSON, err := json.Marshal(textParts)
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, ResponsesInputItem{Role: "assistant", Content: partsJSON})
+				textParts = nil
+			}
+			args := "{}"
+			if len(b.Input) > 0 {
+				args = string(b.Input)
+			}
+			items = append(items, ResponsesInputItem{
+				Type:      "function_call",
+				CallID:    b.ID,
+				Name:      b.Name,
+				Arguments: args,
+				Status:    "completed",
+			})
+		case "thinking":
+			if b.Signature == "" {
+				continue
+			}
+			// Flush pending text before reasoning/compaction
+			if len(textParts) > 0 {
+				partsJSON, err := json.Marshal(textParts)
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, ResponsesInputItem{Role: "assistant", Content: partsJSON})
+				textParts = nil
+			}
+			// Try compaction first (cm1# prefix)
+			if compaction := decodeCompactionSignature(b.Signature); compaction != nil {
+				items = append(items, ResponsesInputItem{
+					Type:             "compaction",
+					ID:               compaction.id,
+					EncryptedContent: compaction.encryptedContent,
+				})
+				continue
+			}
+			// Reasoning with @ separator
+			if strings.Contains(b.Signature, "@") {
+				enc, id := parseReasoningSignature(b.Signature)
+				if len(id) > maxReasoningIDLength {
+					continue
+				}
+				thinking := b.Thinking
+				if thinking == thinkingPlaceholder {
+					thinking = ""
+				}
+				item := ResponsesInputItem{
+					Type:             "reasoning",
+					ID:               id,
+					EncryptedContent: enc,
+				}
+				if thinking != "" {
+					item.Summary = []ResponsesSummary{{Type: "summary_text", Text: thinking}}
+				}
+				items = append(items, item)
+			}
+		}
+	}
+
+	// Flush remaining text
+	if len(textParts) > 0 {
+		partsJSON, err := json.Marshal(textParts)
 		if err != nil {
 			return nil, err
 		}
 		items = append(items, ResponsesInputItem{Role: "assistant", Content: partsJSON})
 	}
 
-	// tool_use → function_call items.
-	for _, b := range blocks {
-		if b.Type != "tool_use" {
-			continue
-		}
-		args := "{}"
-		if len(b.Input) > 0 {
-			args = string(b.Input)
-		}
-		fcID := toResponsesCallID(b.ID)
-		items = append(items, ResponsesInputItem{
-			Type:      "function_call",
-			CallID:    fcID,
-			Name:      b.Name,
-			Arguments: args,
-		})
-	}
-
 	return items, nil
 }
 
-// toResponsesCallID converts an Anthropic tool ID (toolu_xxx / call_xxx) to a
-// Responses API function_call ID that starts with "fc_".
-func toResponsesCallID(id string) string {
-	if strings.HasPrefix(id, "fc_") {
-		return id
-	}
-	return "fc_" + id
+const (
+	thinkingPlaceholder          = "Thinking..."
+	compactionSignaturePrefix    = "cm1#"
+	compactionSignatureSeparator = "@"
+	maxReasoningIDLength         = 64
+)
+
+type compactionCarrier struct {
+	id               string
+	encryptedContent string
 }
 
-// fromResponsesCallID reverses toResponsesCallID, stripping the "fc_" prefix
-// that was added during request conversion.
-func fromResponsesCallID(id string) string {
-	if after, ok := strings.CutPrefix(id, "fc_"); ok {
-		// Only strip if the remainder doesn't look like it was already "fc_" prefixed.
-		// E.g. "fc_toolu_xxx" → "toolu_xxx", "fc_call_xxx" → "call_xxx"
-		if strings.HasPrefix(after, "toolu_") || strings.HasPrefix(after, "call_") {
-			return after
-		}
+// encodeCompactionSignature encodes a compaction carrier into a signature string.
+func encodeCompactionSignature(id, encryptedContent string) string {
+	return compactionSignaturePrefix + encryptedContent + compactionSignatureSeparator + id
+}
+
+// decodeCompactionSignature decodes a cm1#-prefixed signature into its parts.
+func decodeCompactionSignature(sig string) *compactionCarrier {
+	if !strings.HasPrefix(sig, compactionSignaturePrefix) {
+		return nil
 	}
-	return id
+	raw := sig[len(compactionSignaturePrefix):]
+	sepIdx := strings.Index(raw, compactionSignatureSeparator)
+	if sepIdx <= 0 || sepIdx == len(raw)-1 {
+		return nil
+	}
+	enc := raw[:sepIdx]
+	id := raw[sepIdx+1:]
+	if enc == "" {
+		return nil
+	}
+	return &compactionCarrier{id: id, encryptedContent: enc}
+}
+
+// parseReasoningSignature splits "encrypted_content@id" into its parts.
+func parseReasoningSignature(sig string) (encryptedContent, id string) {
+	idx := strings.LastIndex(sig, "@")
+	if idx <= 0 || idx == len(sig)-1 {
+		return sig, ""
+	}
+	return sig[:idx], sig[idx+1:]
+}
+
+// encodeReasoningSignature builds "encrypted_content@id".
+func encodeReasoningSignature(encryptedContent, id string) string {
+	return encryptedContent + "@" + id
 }
 
 // anthropicImageToDataURI converts an AnthropicImageSource to a data URI string.

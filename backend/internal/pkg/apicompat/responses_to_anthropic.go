@@ -32,10 +32,21 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 					summaryText += s.Text
 				}
 			}
-			if summaryText != "" {
+			if summaryText == "" {
+				summaryText = thinkingPlaceholder
+			}
+			sig := encodeReasoningSignature(item.EncryptedContent, item.ID)
+			blocks = append(blocks, AnthropicContentBlock{
+				Type:      "thinking",
+				Thinking:  summaryText,
+				Signature: sig,
+			})
+		case "compaction":
+			if item.ID != "" && item.EncryptedContent != "" {
 				blocks = append(blocks, AnthropicContentBlock{
-					Type:     "thinking",
-					Thinking: summaryText,
+					Type:      "thinking",
+					Thinking:  thinkingPlaceholder,
+					Signature: encodeCompactionSignature(item.ID, item.EncryptedContent),
 				})
 			}
 		case "message":
@@ -50,7 +61,7 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 		case "function_call":
 			blocks = append(blocks, AnthropicContentBlock{
 				Type:  "tool_use",
-				ID:    fromResponsesCallID(item.CallID),
+				ID:    item.CallID,
 				Name:  item.Name,
 				Input: json.RawMessage(item.Arguments),
 			})
@@ -84,12 +95,14 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 	out.StopReason = responsesStatusToAnthropicStopReason(resp.Status, resp.IncompleteDetails, blocks)
 
 	if resp.Usage != nil {
-		out.Usage = AnthropicUsage{
-			InputTokens:  resp.Usage.InputTokens,
-			OutputTokens: resp.Usage.OutputTokens,
-		}
+		cachedTokens := 0
 		if resp.Usage.InputTokensDetails != nil {
-			out.Usage.CacheReadInputTokens = resp.Usage.InputTokensDetails.CachedTokens
+			cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
+		}
+		out.Usage = AnthropicUsage{
+			InputTokens:         resp.Usage.InputTokens - cachedTokens,
+			OutputTokens:        resp.Usage.OutputTokens,
+			CacheReadInputTokens: cachedTokens,
 		}
 	}
 
@@ -127,8 +140,13 @@ type ResponsesEventToAnthropicState struct {
 	ContentBlockOpen  bool
 	CurrentBlockType  string // "text" | "thinking" | "tool_use"
 
+	HasReasoningDelta bool
+
 	// OutputIndexToBlockIdx maps Responses output_index → Anthropic content block index.
 	OutputIndexToBlockIdx map[int]int
+
+	// FuncCallWhitespaceCount tracks consecutive whitespace chars per output_index.
+	FuncCallWhitespaceCount map[int]int
 
 	InputTokens          int
 	OutputTokens         int
@@ -142,8 +160,9 @@ type ResponsesEventToAnthropicState struct {
 // NewResponsesEventToAnthropicState returns an initialised stream state.
 func NewResponsesEventToAnthropicState() *ResponsesEventToAnthropicState {
 	return &ResponsesEventToAnthropicState{
-		OutputIndexToBlockIdx: make(map[int]int),
-		Created:               time.Now().Unix(),
+		OutputIndexToBlockIdx:   make(map[int]int),
+		FuncCallWhitespaceCount: make(map[int]int),
+		Created:                 time.Now().Unix(),
 	}
 }
 
@@ -172,8 +191,12 @@ func ResponsesEventToAnthropicEvents(
 		return resToAnthHandleReasoningDelta(evt, state)
 	case "response.reasoning_summary_text.done":
 		return resToAnthHandleBlockDone(state)
-	case "response.completed", "response.incomplete", "response.failed":
+	case "response.completed", "response.incomplete":
 		return resToAnthHandleCompleted(evt, state)
+	case "response.failed":
+		return resToAnthHandleFailed(evt, state)
+	case "error":
+		return resToAnthHandleError(evt, state)
 	default:
 		return nil
 	}
@@ -268,7 +291,7 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 			Index: &idx,
 			ContentBlock: &AnthropicContentBlock{
 				Type:  "tool_use",
-				ID:    fromResponsesCallID(evt.Item.CallID),
+				ID:    evt.Item.CallID,
 				Name:  evt.Item.Name,
 				Input: json.RawMessage("{}"),
 			},
@@ -337,6 +360,8 @@ func resToAnthHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	return events
 }
 
+const maxConsecutiveFuncCallWhitespace = 20
+
 func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
 	if evt.Delta == "" {
 		return nil
@@ -346,6 +371,30 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 	if !ok {
 		return nil
 	}
+
+	// Check for runaway whitespace in function call arguments
+	count := state.FuncCallWhitespaceCount[evt.OutputIndex]
+	for _, ch := range evt.Delta {
+		if ch == '\r' || ch == '\n' || ch == '\t' {
+			count++
+			if count > maxConsecutiveFuncCallWhitespace {
+				var events []AnthropicStreamEvent
+				events = append(events, closeCurrentBlock(state)...)
+				events = append(events, AnthropicStreamEvent{
+					Type: "error",
+					Error: &AnthropicErrorDetail{
+						Type:    "api_error",
+						Message: "Received function call arguments delta containing more than 20 consecutive whitespace characters.",
+					},
+				})
+				state.MessageStopSent = true
+				return events
+			}
+		} else if ch != ' ' {
+			count = 0
+		}
+	}
+	state.FuncCallWhitespaceCount[evt.OutputIndex] = count
 
 	return []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
@@ -366,6 +415,8 @@ func resToAnthHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEv
 	if !ok {
 		return nil
 	}
+
+	state.HasReasoningDelta = true
 
 	return []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
@@ -389,15 +440,110 @@ func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEv
 		return nil
 	}
 
-	// Handle web_search_call → synthesize server_tool_use + web_search_tool_result blocks.
-	if evt.Item.Type == "web_search_call" && evt.Item.Status == "completed" {
-		return resToAnthHandleWebSearchDone(evt, state)
+	switch evt.Item.Type {
+	case "web_search_call":
+		if evt.Item.Status == "completed" {
+			return resToAnthHandleWebSearchDone(evt, state)
+		}
+	case "reasoning":
+		return resToAnthHandleReasoningItemDone(evt, state)
+	case "compaction":
+		return resToAnthHandleCompactionItemDone(evt, state)
 	}
 
 	if state.ContentBlockOpen {
 		return closeCurrentBlock(state)
 	}
 	return nil
+}
+
+func resToAnthHandleReasoningItemDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	var events []AnthropicStreamEvent
+
+	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	if !ok {
+		// Open a thinking block if one wasn't opened by reasoning_summary_text.delta
+		events = append(events, closeCurrentBlock(state)...)
+		blockIdx = state.ContentBlockIndex
+		state.OutputIndexToBlockIdx[evt.OutputIndex] = blockIdx
+		state.ContentBlockOpen = true
+		state.CurrentBlockType = "thinking"
+		events = append(events, AnthropicStreamEvent{
+			Type:  "content_block_start",
+			Index: &blockIdx,
+			ContentBlock: &AnthropicContentBlock{
+				Type:     "thinking",
+				Thinking: "",
+			},
+		})
+	}
+
+	// If no summary deltas were sent, emit a placeholder thinking_delta
+	if !state.HasReasoningDelta {
+		events = append(events, AnthropicStreamEvent{
+			Type:  "content_block_delta",
+			Index: &blockIdx,
+			Delta: &AnthropicDelta{
+				Type:     "thinking_delta",
+				Thinking: thinkingPlaceholder,
+			},
+		})
+	}
+
+	sig := encodeReasoningSignature(evt.Item.EncryptedContent, evt.Item.ID)
+	events = append(events, AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &blockIdx,
+		Delta: &AnthropicDelta{
+			Type:      "signature_delta",
+			Signature: sig,
+		},
+	})
+
+	state.HasReasoningDelta = false
+	return events
+}
+
+func resToAnthHandleCompactionItemDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	if evt.Item.ID == "" || evt.Item.EncryptedContent == "" {
+		return nil
+	}
+
+	var events []AnthropicStreamEvent
+	events = append(events, closeCurrentBlock(state)...)
+
+	idx := state.ContentBlockIndex
+	state.ContentBlockOpen = true
+	state.CurrentBlockType = "thinking"
+
+	events = append(events, AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &AnthropicContentBlock{
+			Type:     "thinking",
+			Thinking: "",
+		},
+	})
+
+	events = append(events, AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &AnthropicDelta{
+			Type:     "thinking_delta",
+			Thinking: thinkingPlaceholder,
+		},
+	})
+
+	events = append(events, AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &AnthropicDelta{
+			Type:      "signature_delta",
+			Signature: encodeCompactionSignature(evt.Item.ID, evt.Item.EncryptedContent),
+		},
+	})
+
+	return events
 }
 
 // resToAnthHandleWebSearchDone converts an OpenAI web_search_call output item
@@ -466,11 +612,13 @@ func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	stopReason := "end_turn"
 	if evt.Response != nil {
 		if evt.Response.Usage != nil {
-			state.InputTokens = evt.Response.Usage.InputTokens
-			state.OutputTokens = evt.Response.Usage.OutputTokens
+			cachedTokens := 0
 			if evt.Response.Usage.InputTokensDetails != nil {
-				state.CacheReadInputTokens = evt.Response.Usage.InputTokensDetails.CachedTokens
+				cachedTokens = evt.Response.Usage.InputTokensDetails.CachedTokens
 			}
+			state.InputTokens = evt.Response.Usage.InputTokens - cachedTokens
+			state.OutputTokens = evt.Response.Usage.OutputTokens
+			state.CacheReadInputTokens = cachedTokens
 		}
 		switch evt.Response.Status {
 		case "incomplete":
@@ -512,5 +660,45 @@ func closeCurrentBlock(state *ResponsesEventToAnthropicState) []AnthropicStreamE
 	return []AnthropicStreamEvent{{
 		Type:  "content_block_stop",
 		Index: &idx,
+	}}
+}
+
+func resToAnthHandleFailed(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	if state.MessageStopSent {
+		return nil
+	}
+
+	var events []AnthropicStreamEvent
+	events = append(events, closeCurrentBlock(state)...)
+
+	msg := "The response failed due to an unknown error."
+	if evt.Response != nil && evt.Response.Error != nil {
+		msg = evt.Response.Error.Message
+	}
+
+	events = append(events, AnthropicStreamEvent{
+		Type: "error",
+		Error: &AnthropicErrorDetail{
+			Type:    "api_error",
+			Message: msg,
+		},
+	})
+	state.MessageStopSent = true
+	return events
+}
+
+func resToAnthHandleError(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	msg := "An unexpected error occurred during streaming."
+	if evt.Delta != "" {
+		msg = evt.Delta
+	}
+
+	state.MessageStopSent = true
+	return []AnthropicStreamEvent{{
+		Type: "error",
+		Error: &AnthropicErrorDetail{
+			Type:    "api_error",
+			Message: msg,
+		},
 	}}
 }
