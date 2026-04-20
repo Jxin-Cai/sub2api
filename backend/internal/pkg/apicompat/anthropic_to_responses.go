@@ -206,10 +206,15 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 			continue
 		}
 		outputText, imageParts := convertToolResultOutput(b)
+		status := "completed"
+		if b.IsError {
+			status = "incomplete"
+		}
 		out = append(out, ResponsesInputItem{
 			Type:   "function_call_output",
 			CallID: b.ToolUseID,
 			Output: outputText,
+			Status: status,
 		})
 		toolResultImageParts = append(toolResultImageParts, imageParts...)
 	}
@@ -332,6 +337,8 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 				}
 				if thinking != "" {
 					item.Summary = []ResponsesSummary{{Type: "summary_text", Text: thinking}}
+				} else {
+					item.Summary = []ResponsesSummary{{Type: "summary_text", Text: ""}}
 				}
 				items = append(items, item)
 			}

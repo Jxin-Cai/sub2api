@@ -124,6 +124,7 @@ func applyCodexOAuthTransform(reqBody map[string]any, isCodexCLI bool, isCompact
 		"top_p",
 		"frequency_penalty",
 		"presence_penalty",
+		"metadata",
 		// prompt_cache_retention is a newer Responses API parameter (cache TTL).
 		// The ChatGPT internal Codex endpoint rejects it with
 		// "Unsupported parameter: prompt_cache_retention". Defense-in-depth

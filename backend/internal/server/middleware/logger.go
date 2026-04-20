@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -23,6 +24,11 @@ func Logger() gin.HandlerFunc {
 
 		// 跳过健康检查等高频探针路径的日志
 		if path == "/health" || path == "/setup/status" {
+			return
+		}
+
+		// 跳过注册和认证相关路径的日志
+		if strings.HasPrefix(path, "/api/v1/auth/") {
 			return
 		}
 

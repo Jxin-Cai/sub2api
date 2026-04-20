@@ -33,6 +33,38 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "thinking":
+			if block.Signature != "" {
+				// Check for compaction first
+				if compaction := decodeCompactionSignature(block.Signature); compaction != nil {
+					outputs = append(outputs, ResponsesOutput{
+						Type:             "compaction",
+						ID:               compaction.id,
+						EncryptedContent: compaction.encryptedContent,
+					})
+					continue
+				}
+				// Reasoning with signature
+				enc, id := parseReasoningSignature(block.Signature)
+				if id != "" && len(id) <= maxReasoningIDLength {
+					thinking := block.Thinking
+					if thinking == thinkingPlaceholder {
+						thinking = ""
+					}
+					item := ResponsesOutput{
+						Type:             "reasoning",
+						ID:               id,
+						EncryptedContent: enc,
+					}
+					if thinking != "" {
+						item.Summary = []ResponsesSummary{{Type: "summary_text", Text: thinking}}
+					} else {
+						item.Summary = []ResponsesSummary{{Type: "summary_text", Text: ""}}
+					}
+					outputs = append(outputs, item)
+					continue
+				}
+			}
+			// Fallback: thinking without valid signature
 			if block.Thinking != "" {
 				outputs = append(outputs, ResponsesOutput{
 					Type: "reasoning",
@@ -149,6 +181,9 @@ type AnthropicEventToResponsesState struct {
 	// For function_call: track per-output info
 	CurrentCallID string
 	CurrentName   string
+
+	// For reasoning: accumulate signature deltas
+	AccumulatedSignature string
 
 	// Usage from message_delta
 	InputTokens          int
@@ -340,7 +375,8 @@ func anthToResHandleContentBlockDelta(evt *AnthropicStreamEvent, state *Anthropi
 		})}
 
 	case "signature_delta":
-		// Anthropic signature deltas have no Responses equivalent; skip
+		// Accumulate signature for later use in output_item.done
+		state.AccumulatedSignature += evt.Delta.Signature
 		return nil
 	}
 
@@ -430,21 +466,40 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 	itemType := state.CurrentItemType
 	itemID := state.CurrentItemID
 
+	item := &ResponsesOutput{
+		Type:   itemType,
+		ID:     itemID,
+		Status: "completed",
+	}
+
+	// For reasoning items, parse the accumulated signature into encrypted_content + id
+	if itemType == "reasoning" && state.AccumulatedSignature != "" {
+		sig := state.AccumulatedSignature
+		if compaction := decodeCompactionSignature(sig); compaction != nil {
+			item.Type = "compaction"
+			item.ID = compaction.id
+			item.EncryptedContent = compaction.encryptedContent
+		} else {
+			enc, id := parseReasoningSignature(sig)
+			item.EncryptedContent = enc
+			if id != "" {
+				item.ID = id
+			}
+		}
+	}
+
 	// Reset
 	state.CurrentItemType = ""
 	state.CurrentItemID = ""
 	state.CurrentCallID = ""
 	state.CurrentName = ""
+	state.AccumulatedSignature = ""
 	state.OutputIndex++
 	state.ContentIndex = 0
 
 	return []ResponsesStreamEvent{makeResponsesEvent(state, "response.output_item.done", &ResponsesStreamEvent{
 		OutputIndex: state.OutputIndex - 1, // Use the index before increment
-		Item: &ResponsesOutput{
-			Type:   itemType,
-			ID:     itemID,
-			Status: "completed",
-		},
+		Item:        item,
 	})}
 }
 

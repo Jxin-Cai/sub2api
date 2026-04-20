@@ -123,6 +123,11 @@ func (s *GatewayService) ForwardAsResponses(
 			_ = resp.Body.Close()
 		}
 		safeErr := sanitizeUpstreamErrorMessage(err.Error())
+		logger.L().Warn("forward_as_responses: upstream request failed",
+			zap.Int64("account_id", account.ID),
+			zap.String("mapped_model", mappedModel),
+			zap.String("error", safeErr),
+		)
 		setOpsUpstreamError(c, 0, safeErr, "")
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 			Platform:           account.Platform,
@@ -145,6 +150,13 @@ func (s *GatewayService) ForwardAsResponses(
 
 		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+
+		logger.L().Warn("forward_as_responses: upstream error response",
+			zap.Int64("account_id", account.ID),
+			zap.String("mapped_model", mappedModel),
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("message", upstreamMsg),
+		)
 
 		if s.shouldFailoverUpstreamError(resp.StatusCode) {
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
