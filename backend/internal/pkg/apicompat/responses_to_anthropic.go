@@ -142,6 +142,9 @@ type ResponsesEventToAnthropicState struct {
 
 	HasReasoningDelta bool
 
+	// BlockHasDelta tracks whether each block index has received any delta.
+	BlockHasDelta map[int]bool
+
 	// OutputIndexToBlockIdx maps Responses output_index → Anthropic content block index.
 	OutputIndexToBlockIdx map[int]int
 
@@ -162,6 +165,7 @@ func NewResponsesEventToAnthropicState() *ResponsesEventToAnthropicState {
 	return &ResponsesEventToAnthropicState{
 		OutputIndexToBlockIdx:   make(map[int]int),
 		FuncCallWhitespaceCount: make(map[int]int),
+		BlockHasDelta:           make(map[int]bool),
 		Created:                 time.Now().Unix(),
 	}
 }
@@ -180,17 +184,17 @@ func ResponsesEventToAnthropicEvents(
 	case "response.output_text.delta":
 		return resToAnthHandleTextDelta(evt, state)
 	case "response.output_text.done":
-		return resToAnthHandleBlockDone(state)
+		return resToAnthHandleOutputTextDone(evt, state)
 	case "response.function_call_arguments.delta":
 		return resToAnthHandleFuncArgsDelta(evt, state)
 	case "response.function_call_arguments.done":
-		return resToAnthHandleBlockDone(state)
+		return resToAnthHandleFuncArgsDone(evt, state)
 	case "response.output_item.done":
 		return resToAnthHandleOutputItemDone(evt, state)
 	case "response.reasoning_summary_text.delta":
 		return resToAnthHandleReasoningDelta(evt, state)
 	case "response.reasoning_summary_text.done":
-		return resToAnthHandleBlockDone(state)
+		return resToAnthHandleReasoningSummaryDone(evt, state)
 	case "response.completed", "response.incomplete":
 		return resToAnthHandleCompleted(evt, state)
 	case "response.failed":
@@ -349,6 +353,7 @@ func resToAnthHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	}
 
 	idx := state.ContentBlockIndex
+	state.BlockHasDelta[idx] = true
 	events = append(events, AnthropicStreamEvent{
 		Type:  "content_block_delta",
 		Index: &idx,
@@ -396,6 +401,7 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 	}
 	state.FuncCallWhitespaceCount[evt.OutputIndex] = count
 
+	state.BlockHasDelta[blockIdx] = true
 	return []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
 		Index: &blockIdx,
@@ -417,6 +423,7 @@ func resToAnthHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEv
 	}
 
 	state.HasReasoningDelta = true
+	state.BlockHasDelta[blockIdx] = true
 
 	return []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
@@ -428,11 +435,109 @@ func resToAnthHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEv
 	}}
 }
 
-func resToAnthHandleBlockDone(state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
-	if !state.ContentBlockOpen {
+// resToAnthHandleReasoningSummaryDone handles response.reasoning_summary_text.done.
+// Per the reference implementation, this does NOT close the block — it only emits
+// a fallback thinking_delta if no delta was previously sent for this block.
+func resToAnthHandleReasoningSummaryDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	if !ok {
+		// Open a thinking block if needed
+		var events []AnthropicStreamEvent
+		events = append(events, closeCurrentBlock(state)...)
+		blockIdx = state.ContentBlockIndex
+		state.OutputIndexToBlockIdx[evt.OutputIndex] = blockIdx
+		state.ContentBlockOpen = true
+		state.CurrentBlockType = "thinking"
+		events = append(events, AnthropicStreamEvent{
+			Type:  "content_block_start",
+			Index: &blockIdx,
+			ContentBlock: &AnthropicContentBlock{
+				Type:     "thinking",
+				Thinking: "",
+			},
+		})
+		if evt.Text != "" && !state.BlockHasDelta[blockIdx] {
+			events = append(events, AnthropicStreamEvent{
+				Type:  "content_block_delta",
+				Index: &blockIdx,
+				Delta: &AnthropicDelta{
+					Type:     "thinking_delta",
+					Thinking: evt.Text,
+				},
+			})
+			state.BlockHasDelta[blockIdx] = true
+		}
+		return events
+	}
+
+	if evt.Text != "" && !state.BlockHasDelta[blockIdx] {
+		state.BlockHasDelta[blockIdx] = true
+		return []AnthropicStreamEvent{{
+			Type:  "content_block_delta",
+			Index: &blockIdx,
+			Delta: &AnthropicDelta{
+				Type:     "thinking_delta",
+				Thinking: evt.Text,
+			},
+		}}
+	}
+	return nil
+}
+
+// resToAnthHandleOutputTextDone handles response.output_text.done.
+// Does NOT close the block — only emits a fallback text_delta if no delta was sent.
+func resToAnthHandleOutputTextDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	blockIdx := state.ContentBlockIndex
+	if evt.Text != "" && !state.BlockHasDelta[blockIdx] {
+		// Open text block if needed
+		var events []AnthropicStreamEvent
+		if !state.ContentBlockOpen || state.CurrentBlockType != "text" {
+			events = append(events, closeCurrentBlock(state)...)
+			blockIdx = state.ContentBlockIndex
+			state.ContentBlockOpen = true
+			state.CurrentBlockType = "text"
+			events = append(events, AnthropicStreamEvent{
+				Type:  "content_block_start",
+				Index: &blockIdx,
+				ContentBlock: &AnthropicContentBlock{
+					Type: "text",
+					Text: "",
+				},
+			})
+		}
+		events = append(events, AnthropicStreamEvent{
+			Type:  "content_block_delta",
+			Index: &blockIdx,
+			Delta: &AnthropicDelta{
+				Type: "text_delta",
+				Text: evt.Text,
+			},
+		})
+		state.BlockHasDelta[blockIdx] = true
+		return events
+	}
+	return nil
+}
+
+// resToAnthHandleFuncArgsDone handles response.function_call_arguments.done.
+// Does NOT close the block — only emits a fallback input_json_delta if no delta was sent.
+func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	if !ok {
 		return nil
 	}
-	return closeCurrentBlock(state)
+	if evt.Arguments != "" && !state.BlockHasDelta[blockIdx] {
+		state.BlockHasDelta[blockIdx] = true
+		return []AnthropicStreamEvent{{
+			Type:  "content_block_delta",
+			Index: &blockIdx,
+			Delta: &AnthropicDelta{
+				Type:        "input_json_delta",
+				PartialJSON: evt.Arguments,
+			},
+		}}
+	}
+	return nil
 }
 
 func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {

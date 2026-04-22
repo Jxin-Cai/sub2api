@@ -320,14 +320,13 @@ func TestStreamingTextOnly(t *testing.T) {
 	require.Len(t, events, 1) // only delta, no new block start
 	assert.Equal(t, "content_block_delta", events[0].Type)
 
-	// 5. text done
+	// 5. text done — does NOT close block (lazy close on next item or completed)
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
 		Type: "response.output_text.done",
 	}, state)
-	require.Len(t, events, 1)
-	assert.Equal(t, "content_block_stop", events[0].Type)
+	require.Len(t, events, 0)
 
-	// 6. completed
+	// 6. completed — closes open block + message_delta + message_stop
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
 		Type: "response.completed",
 		Response: &ResponsesResponse{
@@ -335,12 +334,13 @@ func TestStreamingTextOnly(t *testing.T) {
 			Usage:  &ResponsesUsage{InputTokens: 10, OutputTokens: 5},
 		},
 	}, state)
-	require.Len(t, events, 2) // message_delta + message_stop
-	assert.Equal(t, "message_delta", events[0].Type)
-	assert.Equal(t, "end_turn", events[0].Delta.StopReason)
-	assert.Equal(t, 10, events[0].Usage.InputTokens)
-	assert.Equal(t, 5, events[0].Usage.OutputTokens)
-	assert.Equal(t, "message_stop", events[1].Type)
+	require.Len(t, events, 3) // content_block_stop + message_delta + message_stop
+	assert.Equal(t, "content_block_stop", events[0].Type)
+	assert.Equal(t, "message_delta", events[1].Type)
+	assert.Equal(t, "end_turn", events[1].Delta.StopReason)
+	assert.Equal(t, 10, events[1].Usage.InputTokens)
+	assert.Equal(t, 5, events[1].Usage.OutputTokens)
+	assert.Equal(t, "message_stop", events[2].Type)
 }
 
 func TestStreamingToolCall(t *testing.T) {
@@ -374,14 +374,22 @@ func TestStreamingToolCall(t *testing.T) {
 	assert.Equal(t, "input_json_delta", events[0].Delta.Type)
 	assert.Equal(t, `{"city":`, events[0].Delta.PartialJSON)
 
-	// 4. arguments done
+	// 4. arguments done — does NOT close block
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
 		Type: "response.function_call_arguments.done",
+	}, state)
+	require.Len(t, events, 0)
+
+	// 5. output_item.done closes the function_call block
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.done",
+		OutputIndex: 0,
+		Item:        &ResponsesOutput{Type: "function_call", Status: "completed"},
 	}, state)
 	require.Len(t, events, 1)
 	assert.Equal(t, "content_block_stop", events[0].Type)
 
-	// 5. completed with tool_calls
+	// 6. completed with tool_calls
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
 		Type: "response.completed",
 		Response: &ResponsesResponse{
@@ -422,12 +430,27 @@ func TestStreamingReasoning(t *testing.T) {
 	assert.Equal(t, "thinking_delta", events[0].Delta.Type)
 	assert.Equal(t, "Let me think...", events[0].Delta.Thinking)
 
-	// reasoning done
+	// reasoning done — does NOT close block
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
 		Type: "response.reasoning_summary_text.done",
 	}, state)
+	require.Len(t, events, 0)
+
+	// output_item.done for reasoning — emits signature + keeps block open for lazy close
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.done",
+		OutputIndex: 0,
+		Item: &ResponsesOutput{
+			Type:             "reasoning",
+			ID:               "rs_abc123",
+			EncryptedContent: "enc_data",
+		},
+	}, state)
+	// Should emit signature_delta (thinking_delta placeholder skipped because HasReasoningDelta=true)
 	require.Len(t, events, 1)
-	assert.Equal(t, "content_block_stop", events[0].Type)
+	assert.Equal(t, "content_block_delta", events[0].Type)
+	assert.Equal(t, "signature_delta", events[0].Delta.Type)
+	assert.Equal(t, "enc_data@rs_abc123", events[0].Delta.Signature)
 }
 
 func TestStreamingIncomplete(t *testing.T) {
