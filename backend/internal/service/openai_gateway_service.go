@@ -5262,7 +5262,7 @@ func normalizeOpenAIReasoningEffort(raw string) string {
 
 	switch value {
 	case "none", "minimal":
-		return ""
+		return "none"
 	case "low", "medium", "high":
 		return value
 	case "xhigh", "extrahigh":

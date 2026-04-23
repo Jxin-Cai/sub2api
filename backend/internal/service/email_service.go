@@ -71,7 +71,7 @@ type PasswordResetTokenData struct {
 
 const (
 	verifyCodeTTL         = 15 * time.Minute
-	verifyCodeCooldown    = 1 * time.Minute
+	verifyCodeCooldown    = 2 * time.Minute
 	maxVerifyCodeAttempts = 5
 
 	// Password reset token settings

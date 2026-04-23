@@ -61,16 +61,33 @@ func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, erro
 		}
 		out.ToolChoice = tc
 	}
+	if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
+		mergedToolChoice, err := mergeDisableParallelToolUse(out.ToolChoice)
+		if err != nil {
+			return nil, fmt.Errorf("merge tool_choice disable_parallel_tool_use: %w", err)
+		}
+		out.ToolChoice = mergedToolChoice
+	}
 
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
-		effort := mapResponsesEffortToAnthropic(req.Reasoning.Effort)
-		out.OutputConfig = &AnthropicOutputConfig{Effort: effort}
-		if effort != "low" {
-			out.Thinking = &AnthropicThinking{
-				Type:         "enabled",
-				BudgetTokens: defaultThinkingBudget(effort),
+		effort := normalizeResponsesReasoningEffort(req.Reasoning.Effort)
+		if effort != "" && effort != "none" {
+			anthropicEffort := mapResponsesEffortToAnthropic(effort)
+			out.OutputConfig = &AnthropicOutputConfig{Effort: anthropicEffort}
+			if anthropicEffort != "low" {
+				out.Thinking = &AnthropicThinking{
+					Type:         "enabled",
+					BudgetTokens: defaultThinkingBudget(anthropicEffort),
+				}
 			}
 		}
+	}
+
+	if format := extractResponsesTextFormat(req.Text); len(format) > 0 {
+		if out.OutputConfig == nil {
+			out.OutputConfig = &AnthropicOutputConfig{}
+		}
+		out.OutputConfig.Format = format
 	}
 
 	return out, nil
@@ -99,6 +116,17 @@ func mapResponsesEffortToAnthropic(effort string) string {
 		return "max"
 	}
 	return effort
+}
+
+func normalizeResponsesReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "none":
+		return "none"
+	case "low", "medium", "high", "xhigh":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
+	}
 }
 
 // convertResponsesInputToAnthropic extracts system prompt and messages from
@@ -201,7 +229,11 @@ func responsesContextManagementToAnthropic(raw json.RawMessage) json.RawMessage 
 		if len(edits) == 0 {
 			return nil
 		}
-		encoded, err := json.Marshal(map[string]any{"edits": edits})
+		converted := make([]json.RawMessage, 0, len(edits))
+		for _, edit := range edits {
+			converted = append(converted, responsesContextManagementEditToAnthropic(edit))
+		}
+		encoded, err := json.Marshal(map[string]any{"edits": converted})
 		if err == nil {
 			return encoded
 		}
@@ -212,6 +244,39 @@ func responsesContextManagementToAnthropic(raw json.RawMessage) json.RawMessage 
 		return raw
 	}
 	return nil
+}
+
+func responsesContextManagementEditToAnthropic(raw json.RawMessage) json.RawMessage {
+	var edit map[string]any
+	if err := json.Unmarshal(raw, &edit); err != nil {
+		return raw
+	}
+	if strings.TrimSpace(stringValue(edit["type"])) != "compaction" {
+		return raw
+	}
+	converted := map[string]any{
+		"type": "compact_20260112",
+		"trigger": map[string]any{"type": "input_tokens"},
+	}
+	if threshold, ok := intValue(edit["compact_threshold"]); ok {
+		converted["trigger"].(map[string]any)["value"] = threshold
+	}
+	return mustMarshalJSON(converted)
+}
+
+func extractResponsesTextFormat(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil
+	}
+	format := payload["format"]
+	if len(format) == 0 || string(format) == "null" {
+		return nil
+	}
+	return format
 }
 
 func isResponsesMCPNamespace(namespace string, raw json.RawMessage) bool {
@@ -282,6 +347,18 @@ func convertResponsesUserToAnthropicContent(raw json.RawMessage) (json.RawMessag
 			if src != nil {
 				blocks = append(blocks, AnthropicContentBlock{Type: "image", Source: src})
 			}
+		case "input_audio":
+			if text := describeResponsesAudioPart(p); text != "" {
+				blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: text})
+			}
+		case "file", "input_file":
+			if text := describeResponsesFilePart(p); text != "" {
+				blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: text})
+			}
+		case "file_data", "file_id", "file_url":
+			if text := describeResponsesFilePart(p); text != "" {
+				blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: text})
+			}
 		}
 	}
 
@@ -346,6 +423,65 @@ func dataURIToAnthropicImageSource(dataURI string) *AnthropicImageSource {
 	}
 	data := strings.TrimPrefix(rest, "base64,")
 	return &AnthropicImageSource{Type: "base64", MediaType: mediaType, Data: data}
+}
+
+func describeResponsesAudioPart(part ResponsesContentPart) string {
+	if part.InputAudio == nil {
+		return ""
+	}
+	format := strings.TrimSpace(part.InputAudio.Format)
+	if format == "" {
+		format = "unknown"
+	}
+	return fmt.Sprintf("[audio input omitted in Anthropic conversion: format=%s]", format)
+}
+
+func describeResponsesFilePart(part ResponsesContentPart) string {
+	parts := make([]string, 0, 4)
+	if part.FileID != "" {
+		parts = append(parts, "file_id="+part.FileID)
+	}
+	if part.FileURL != "" {
+		parts = append(parts, "file_url="+part.FileURL)
+	}
+	if part.Filename != "" {
+		parts = append(parts, "filename="+part.Filename)
+	}
+	if part.FileData != "" {
+		parts = append(parts, "file_data=inline")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[file input omitted in Anthropic conversion: " + strings.Join(parts, ", ") + "]"
+}
+
+func stringValue(value any) string {
+	str, _ := value.(string)
+	return str
+}
+
+func intValue(value any) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
+
+func mustMarshalJSON(value any) json.RawMessage {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 // mergeConsecutiveMessages merges consecutive messages with the same role because Anthropic requires alternating turns.
@@ -491,4 +627,16 @@ func convertResponsesToAnthropicToolChoice(raw json.RawMessage) (json.RawMessage
 	}
 
 	return raw, nil
+}
+
+func mergeDisableParallelToolUse(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return json.Marshal(map[string]any{"type": "auto", "disable_parallel_tool_use": true})
+	}
+	var tc map[string]any
+	if err := json.Unmarshal(raw, &tc); err != nil {
+		return nil, err
+	}
+	tc["disable_parallel_tool_use"] = true
+	return json.Marshal(tc)
 }

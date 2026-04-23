@@ -33,7 +33,8 @@ type AnthropicRequest struct {
 
 // AnthropicOutputConfig controls output generation parameters.
 type AnthropicOutputConfig struct {
-	Effort string `json:"effort,omitempty"` // "low" | "medium" | "high" | "max"
+	Effort string          `json:"effort,omitempty"` // "low" | "medium" | "high" | "max"
+	Format json.RawMessage `json:"format,omitempty"`
 }
 
 // AnthropicThinking configures extended thinking in the Anthropic API.
@@ -188,6 +189,7 @@ type ResponsesRequest struct {
 	Input                json.RawMessage     `json:"input"` // string or []ResponsesInputItem
 	Instructions         string              `json:"instructions,omitempty"`
 	MaxOutputTokens      *int                `json:"max_output_tokens,omitempty"`
+	MaxToolCalls        *int                `json:"max_tool_calls,omitempty"`
 	Metadata             json.RawMessage     `json:"metadata,omitempty"`
 	Model                string              `json:"model"`
 	ParallelToolCalls    *bool               `json:"parallel_tool_calls,omitempty"`

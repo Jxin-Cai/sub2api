@@ -955,8 +955,11 @@ func TestAnthropicToResponses_NoOutputConfig(t *testing.T) {
 	assert.Equal(t, "high", resp.Reasoning.Effort)
 }
 
+
+
+
+
 func TestAnthropicToResponses_OutputConfigWithoutEffort(t *testing.T) {
-	// output_config present but effort empty (e.g. only format set) → default high.
 	req := &AnthropicRequest{
 		Model:        "gpt-5.2",
 		MaxTokens:    1024,
@@ -966,6 +969,23 @@ func TestAnthropicToResponses_OutputConfigWithoutEffort(t *testing.T) {
 
 	resp, err := AnthropicToResponses(req)
 	require.NoError(t, err)
+	require.NotNil(t, resp.Reasoning)
+	assert.Equal(t, "high", resp.Reasoning.Effort)
+}
+
+func TestAnthropicToResponses_OutputConfigFormat(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "gpt-5.2",
+		MaxTokens: 1024,
+		Messages:  []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+		OutputConfig: &AnthropicOutputConfig{
+			Format: json.RawMessage(`{"type":"json_schema","name":"weather","schema":{"type":"object"}}`),
+		},
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"format":{"type":"json_schema","name":"weather","schema":{"type":"object"}}}`, string(resp.Text))
 	require.NotNil(t, resp.Reasoning)
 	assert.Equal(t, "high", resp.Reasoning.Effort)
 }
@@ -988,6 +1008,24 @@ func TestAnthropicToResponses_ToolChoiceAuto(t *testing.T) {
 	var tc string
 	require.NoError(t, json.Unmarshal(resp.ToolChoice, &tc))
 	assert.Equal(t, "auto", tc)
+}
+
+func TestAnthropicToResponses_ToolChoiceAutoDisableParallel(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:      "gpt-5.2",
+		MaxTokens:  1024,
+		Messages:   []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+		ToolChoice: json.RawMessage(`{"type":"auto","disable_parallel_tool_use":true}`),
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+
+	var tc string
+	require.NoError(t, json.Unmarshal(resp.ToolChoice, &tc))
+	assert.Equal(t, "auto", tc)
+	require.NotNil(t, resp.ParallelToolCalls)
+	assert.False(t, *resp.ParallelToolCalls)
 }
 
 func TestAnthropicToResponses_ToolChoiceAny(t *testing.T) {
@@ -1426,6 +1464,100 @@ func TestResponsesToAnthropicRequest_MCPRoundTripFields(t *testing.T) {
 	require.Len(t, userBlocks, 1)
 	assert.Equal(t, "mcp_tool_result", userBlocks[0].Type)
 	assert.JSONEq(t, `[{"type":"text","text":"found"}]`, string(userBlocks[0].Content))
+}
+
+
+func TestAnthropicToResponses_ContextManagementCompaction(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "gpt-5.2",
+		MaxTokens: 1024,
+		Messages:  []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+		ContextManagement: json.RawMessage(`{"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":150000}},{"type":"clear_function_results"}]}`),
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[{"type":"compaction","compact_threshold":150000},{"type":"clear_function_results"}]`, string(resp.ContextManagement))
+}
+
+func TestResponsesToAnthropicRequest_TextFormatAndEffort(t *testing.T) {
+	text := json.RawMessage(`{"format":{"type":"json_schema","name":"weather","schema":{"type":"object"}}}`)
+	maxTokens := 512
+	req := &ResponsesRequest{
+		Model:           "gpt-5.2",
+		Input:           json.RawMessage(`[{"role":"user","content":"Hello"}]`),
+		MaxOutputTokens: &maxTokens,
+		Text:            text,
+		Reasoning:       &ResponsesReasoning{Effort: "medium"},
+	}
+
+	anth, err := ResponsesToAnthropicRequest(req)
+	require.NoError(t, err)
+	require.NotNil(t, anth.OutputConfig)
+	assert.Equal(t, "medium", anth.OutputConfig.Effort)
+	assert.JSONEq(t, `{"type":"json_schema","name":"weather","schema":{"type":"object"}}`, string(anth.OutputConfig.Format))
+}
+
+func TestResponsesToAnthropicRequest_DisablesParallelToolCalls(t *testing.T) {
+	parallelToolCalls := false
+	req := &ResponsesRequest{
+		Model:             "gpt-5.2",
+		Input:             json.RawMessage(`[{"role":"user","content":"Hello"}]`),
+		ParallelToolCalls: &parallelToolCalls,
+		ToolChoice:        json.RawMessage(`"required"`),
+	}
+
+	anth, err := ResponsesToAnthropicRequest(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"any","disable_parallel_tool_use":true}`, string(anth.ToolChoice))
+}
+
+func TestResponsesToAnthropicRequest_NoneReasoningDisablesThinking(t *testing.T) {
+	req := &ResponsesRequest{
+		Model:     "gpt-5.2",
+		Input:     json.RawMessage(`[{"role":"user","content":"Hello"}]`),
+		Reasoning: &ResponsesReasoning{Effort: "minimal"},
+	}
+
+	anth, err := ResponsesToAnthropicRequest(req)
+	require.NoError(t, err)
+	assert.Nil(t, anth.Thinking)
+	assert.Nil(t, anth.OutputConfig)
+}
+
+func TestResponsesToAnthropicRequest_FileAndAudioFallback(t *testing.T) {
+	req := &ResponsesRequest{
+		Model: "gpt-5.2",
+		Input: json.RawMessage(`[
+			{"role":"user","content":[
+				{"type":"input_audio","input_audio":{"format":"wav","data":"AAA"}},
+				{"type":"input_file","file_id":"file_123","filename":"report.pdf"}
+			]}
+		]`),
+	}
+
+	anth, err := ResponsesToAnthropicRequest(req)
+	require.NoError(t, err)
+	require.Len(t, anth.Messages, 1)
+	var blocks []AnthropicContentBlock
+	require.NoError(t, json.Unmarshal(anth.Messages[0].Content, &blocks))
+	require.Len(t, blocks, 2)
+	assert.Equal(t, "text", blocks[0].Type)
+	assert.Equal(t, "[audio input omitted in Anthropic conversion: format=wav]", blocks[0].Text)
+	assert.Equal(t, "text", blocks[1].Type)
+	assert.Equal(t, "[file input omitted in Anthropic conversion: file_id=file_123, filename=report.pdf]", blocks[1].Text)
+}
+
+func TestResponsesToAnthropicRequest_ContextManagementCompaction(t *testing.T) {
+	req := &ResponsesRequest{
+		Model:             "gpt-5.2",
+		Input:             json.RawMessage(`[{"role":"user","content":"Hello"}]`),
+		ContextManagement: json.RawMessage(`[{"type":"compaction","compact_threshold":150000},{"type":"clear_function_results"}]`),
+	}
+
+	anth, err := ResponsesToAnthropicRequest(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":150000}},{"type":"clear_function_results"}]}`, string(anth.ContextManagement))
 }
 
 func TestAnthropicToResponsesResponse_MCPToolUseAndContainer(t *testing.T) {

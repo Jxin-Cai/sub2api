@@ -328,7 +328,7 @@ func (s *AuthService) SendVerifyCodeAsync(ctx context.Context, email string) (*S
 
 	logger.LegacyPrintf("service.auth", "[Auth] Verify code enqueued successfully for: %s", email)
 	return &SendVerifyCodeResult{
-		Countdown: 60, // 60秒倒计时
+		Countdown: int(verifyCodeCooldown.Seconds()),
 	}, nil
 }
 

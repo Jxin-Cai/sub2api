@@ -77,6 +77,10 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 		out.Tools = convertAnthropicToolsToResponses(nil, req.MCPServers)
 	}
 
+	if req.OutputConfig != nil && len(req.OutputConfig.Format) > 0 {
+		out.Text = json.RawMessage(`{"format":` + string(req.OutputConfig.Format) + `}`)
+	}
+
 	effort := "high"
 	if req.OutputConfig != nil && req.OutputConfig.Effort != "" {
 		effort = req.OutputConfig.Effort
@@ -88,11 +92,14 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 	}
 
 	if len(req.ToolChoice) > 0 {
-		tc, err := convertAnthropicToolChoiceToResponses(req.ToolChoice)
+		tc, parallelToolCalls, err := convertAnthropicToolChoiceToResponses(req.ToolChoice)
 		if err != nil {
 			return nil, fmt.Errorf("convert tool_choice: %w", err)
 		}
 		out.ToolChoice = tc
+		if parallelToolCalls != nil {
+			out.ParallelToolCalls = parallelToolCalls
+		}
 	}
 
 	return out, nil
@@ -104,29 +111,40 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 //	{"type":"any"}             → "required"
 //	{"type":"none"}            → "none"
 //	{"type":"tool","name":"X"} → {"type":"function","function":{"name":"X"}}
-func convertAnthropicToolChoiceToResponses(raw json.RawMessage) (json.RawMessage, error) {
+func convertAnthropicToolChoiceToResponses(raw json.RawMessage) (json.RawMessage, *bool, error) {
 	var tc struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
+		Type                   string `json:"type"`
+		Name                   string `json:"name"`
+		DisableParallelToolUse *bool  `json:"disable_parallel_tool_use,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &tc); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	var parallelToolCalls *bool
+	if tc.DisableParallelToolUse != nil {
+		value := !*tc.DisableParallelToolUse
+		parallelToolCalls = &value
 	}
 
 	switch tc.Type {
 	case "auto":
-		return json.Marshal("auto")
+		encoded, err := json.Marshal("auto")
+		return encoded, parallelToolCalls, err
 	case "any":
-		return json.Marshal("required")
+		encoded, err := json.Marshal("required")
+		return encoded, parallelToolCalls, err
 	case "none":
-		return json.Marshal("none")
+		encoded, err := json.Marshal("none")
+		return encoded, parallelToolCalls, err
 	case "tool":
-		return json.Marshal(map[string]any{
+		encoded, err := json.Marshal(map[string]any{
 			"type":     "function",
 			"function": map[string]string{"name": tc.Name},
 		})
+		return encoded, parallelToolCalls, err
 	default:
-		return nil, nil
+		return nil, parallelToolCalls, nil
 	}
 }
 
@@ -166,7 +184,7 @@ func anthropicContextManagementToResponses(raw json.RawMessage) json.RawMessage 
 	}
 	var edits []json.RawMessage
 	if err := json.Unmarshal(raw, &edits); err == nil {
-		return raw
+		return normalizeAnthropicContextManagementEditsToResponses(edits)
 	}
 	var payload struct {
 		Edits []json.RawMessage `json:"edits,omitempty"`
@@ -175,12 +193,40 @@ func anthropicContextManagementToResponses(raw json.RawMessage) json.RawMessage 
 		if len(payload.Edits) == 0 {
 			return nil
 		}
-		encoded, err := json.Marshal(payload.Edits)
-		if err == nil {
-			return encoded
-		}
+		return normalizeAnthropicContextManagementEditsToResponses(payload.Edits)
 	}
 	return nil
+}
+
+func normalizeAnthropicContextManagementEditsToResponses(edits []json.RawMessage) json.RawMessage {
+	if len(edits) == 0 {
+		return nil
+	}
+	converted := make([]json.RawMessage, 0, len(edits))
+	for _, edit := range edits {
+		converted = append(converted, anthropicContextManagementEditToResponses(edit))
+	}
+	encoded, err := json.Marshal(converted)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func anthropicContextManagementEditToResponses(raw json.RawMessage) json.RawMessage {
+	var edit map[string]any
+	if err := json.Unmarshal(raw, &edit); err != nil {
+		return raw
+	}
+	if strings.TrimSpace(stringValue(edit["type"])) != "compact_20260112" {
+		return raw
+	}
+	trigger, _ := edit["trigger"].(map[string]any)
+	value, ok := intValue(trigger["value"])
+	if !ok {
+		return mustMarshalJSON(map[string]any{"type": "compaction"})
+	}
+	return mustMarshalJSON(map[string]any{"type": "compaction", "compact_threshold": value})
 }
 
 // parseAnthropicSystemPrompt handles the Anthropic system field which can be

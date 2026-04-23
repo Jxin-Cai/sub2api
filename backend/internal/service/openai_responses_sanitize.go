@@ -13,6 +13,7 @@ var openAIResponsesRequestAllowedKeys = map[string]struct{}{
 	"input":                  {},
 	"instructions":           {},
 	"max_output_tokens":      {},
+	"max_tool_calls":         {},
 	"metadata":               {},
 	"model":                  {},
 	"parallel_tool_calls":    {},
@@ -66,11 +67,13 @@ var openAIResponsesReasoningAllowedKeys = map[string]struct{}{
 }
 
 var openAIResponsesContextManagementAllowedKeys = map[string]struct{}{
-	"type": {},
+	"type":              {},
+	"compact_threshold": {},
 }
 
 var openAIResponsesContextManagementAllowedTypes = map[string]struct{}{
 	"clear_function_results": {},
+	"compaction":             {},
 }
 
 var openAIResponsesCompatOnlyInputKeys = []string{"output_raw", "namespace", "item", "raw_item"}
@@ -117,6 +120,15 @@ func sanitizeOpenAIResponsesRequestMap(reqBody map[string]any) bool {
 		}
 	}
 
+	if normalizedMaxToolCalls, changed, keep := sanitizeOpenAIResponsesMaxToolCalls(reqBody["max_tool_calls"]); changed {
+		modified = true
+		if keep {
+			reqBody["max_tool_calls"] = normalizedMaxToolCalls
+		} else {
+			delete(reqBody, "max_tool_calls")
+		}
+	}
+
 	if input, ok := reqBody["input"].([]any); ok {
 		sanitized, inputModified := sanitizeOpenAIResponsesInput(input)
 		if inputModified {
@@ -145,6 +157,20 @@ func sanitizeOpenAIResponsesRequestMap(reqBody map[string]any) bool {
 	}
 
 	return modified
+}
+
+func sanitizeOpenAIResponsesMaxToolCalls(value any) (any, bool, bool) {
+	if value == nil {
+		return nil, false, false
+	}
+	count, ok := intValueFromAny(value)
+	if !ok || count <= 0 {
+		return nil, true, false
+	}
+	if value == count {
+		return value, false, true
+	}
+	return count, true, true
 }
 
 func sanitizeOpenAIResponsesInput(input []any) ([]any, bool) {
@@ -267,9 +293,41 @@ func sanitizeOpenAIResponsesContextManagementItem(item map[string]any) (map[stri
 		normalized["type"] = typ
 		modified = true
 	}
+	if typ != "compaction" {
+		if _, ok := normalized["compact_threshold"]; ok {
+			delete(normalized, "compact_threshold")
+			modified = true
+		}
+		return normalized, modified, true
+	}
+	if threshold, ok := intValueFromAny(normalized["compact_threshold"]); ok {
+		if rawThreshold, exists := normalized["compact_threshold"]; !exists || rawThreshold != threshold {
+			normalized["compact_threshold"] = threshold
+			modified = true
+		}
+		return normalized, modified, true
+	}
+	delete(normalized, "compact_threshold")
+	modified = true
 	return normalized, modified, true
 }
 
+func intValueFromAny(value any) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int(v), true
+	case float32:
+		return int(v), true
+	case int:
+		return v, true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
 func sanitizeOpenAIResponsesReasoning(reasoning map[string]any) bool {
 	modified := false
 	for key := range reasoning {
@@ -352,6 +410,8 @@ func sanitizeOpenAIResponsesToolChoice(value any) (any, bool, bool) {
 
 func normalizeOpenAIResponsesReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "none":
+		return "none"
 	case "low", "medium", "high", "xhigh":
 		return strings.ToLower(strings.TrimSpace(effort))
 	default:

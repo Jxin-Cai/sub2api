@@ -1984,6 +1984,81 @@ func TestOpenAIBuildUpstreamRequest_SanitizesContextManagementInnerFields(t *tes
 	require.NotContains(t, string(requestBody), `clear_thinking_20251015`)
 }
 
+func TestOpenAIBuildUpstreamRequest_PreservesCompactionContextManagement(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{"model":"gpt-5.2"}`)))
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"}}
+	body := []byte(`{"model":"gpt-5.2","context_management":[{"type":"compaction","compact_threshold":150000,"ignored":true},{"type":"clear_thinking_20251015"}]}`)
+
+	req, err := svc.buildUpstreamRequest(c.Request.Context(), c, account, body, "token", false, "", false)
+	require.NoError(t, err)
+
+	requestBody, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(requestBody), `"context_management":[{"compact_threshold":150000,"type":"compaction"}]`)
+	require.NotContains(t, string(requestBody), `ignored`)
+	require.NotContains(t, string(requestBody), `clear_thinking_20251015`)
+}
+
+
+func TestOpenAIBuildUpstreamRequest_PreservesNoneReasoningEffort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{"model":"gpt-5.2"}`)))
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"}}
+	body := []byte(`{"model":"gpt-5.2","reasoning":{"effort":"minimal","summary":"detailed"}}`)
+
+	req, err := svc.buildUpstreamRequest(c.Request.Context(), c, account, body, "token", false, "", false)
+	require.NoError(t, err)
+
+	requestBody, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(requestBody), `"reasoning":{"effort":"none","summary":"detailed"}`)
+}
+
+func TestOpenAIBuildUpstreamRequest_PreservesValidMaxToolCalls(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{"model":"gpt-5.2"}`)))
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"}}
+	body := []byte(`{"model":"gpt-5.2","max_tool_calls":3}`)
+
+	req, err := svc.buildUpstreamRequest(c.Request.Context(), c, account, body, "token", false, "", false)
+	require.NoError(t, err)
+
+	requestBody, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(requestBody), `"max_tool_calls":3`)
+}
+
+func TestOpenAIBuildUpstreamRequest_RemovesInvalidMaxToolCalls(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{"model":"gpt-5.2"}`)))
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"}}
+	body := []byte(`{"model":"gpt-5.2","max_tool_calls":0}`)
+
+	req, err := svc.buildUpstreamRequest(c.Request.Context(), c, account, body, "token", false, "", false)
+	require.NoError(t, err)
+
+	requestBody, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.NotContains(t, string(requestBody), `"max_tool_calls"`)
+}
+
 func TestOpenAIBuildUpstreamRequest_SanitizesResponsesCompatFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
