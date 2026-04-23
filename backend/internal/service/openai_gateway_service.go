@@ -2610,6 +2610,96 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}, nil
 }
 
+func (s *OpenAIGatewayService) RetrieveResponse(ctx context.Context, c *gin.Context, account *Account) (*OpenAIForwardResult, error) {
+	startTime := time.Now()
+	reqStream := openAIResponsesRetrieveStreams(c)
+
+	token, _, err := s.GetAccessToken(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+
+	upstreamReq, err := s.buildUpstreamRequestOpenAIPassthrough(ctx, c, account, nil, token)
+	if err != nil {
+		return nil, err
+	}
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+
+	if c != nil {
+		c.Set("openai_passthrough", true)
+	}
+
+	upstreamStart := time.Now()
+	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+	if err != nil {
+		safeErr := sanitizeUpstreamErrorMessage(err.Error())
+		setOpsUpstreamError(c, 0, safeErr, "")
+		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			Platform:           account.Platform,
+			AccountID:          account.ID,
+			AccountName:        account.Name,
+			UpstreamStatusCode: 0,
+			Passthrough:        true,
+			Kind:               "request_error",
+			Message:            safeErr,
+		})
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": gin.H{
+				"type":    "upstream_error",
+				"message": "Upstream request failed",
+			},
+		})
+		return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		if shouldFailoverOpenAIPassthroughResponse(resp.StatusCode) {
+			return nil, s.handleFailoverErrorResponsePassthrough(ctx, resp, c, account, nil)
+		}
+		return nil, s.handleErrorResponsePassthrough(ctx, resp, c, account, nil)
+	}
+
+	var usage *OpenAIUsage
+	var firstTokenMs *int
+	if reqStream {
+		result, err := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime)
+		if err != nil {
+			return nil, err
+		}
+		usage = result.usage
+		firstTokenMs = result.firstTokenMs
+	} else {
+		usage, err = s.handleNonStreamingResponsePassthrough(ctx, resp, c)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
+		s.updateCodexUsageSnapshot(ctx, account.ID, snapshot)
+	}
+
+	if usage == nil {
+		usage = &OpenAIUsage{}
+	}
+
+	return &OpenAIForwardResult{
+		RequestID:       resp.Header.Get("x-request-id"),
+		Usage:           *usage,
+		Stream:          reqStream,
+		OpenAIWSMode:    false,
+		Duration:        time.Since(startTime),
+		FirstTokenMs:    firstTokenMs,
+		ResponseHeaders: resp.Header.Clone(),
+	}, nil
+}
+
 func logOpenAIPassthroughInstructionsRejected(
 	ctx context.Context,
 	c *gin.Context,
@@ -2648,6 +2738,12 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	body []byte,
 	token string,
 ) (*http.Request, error) {
+	if sanitizedBody, _, err := sanitizeOpenAIResponsesRequestBody(body); err != nil {
+		return nil, fmt.Errorf("sanitize passthrough responses request: %w", err)
+	} else {
+		body = sanitizedBody
+	}
+
 	targetURL := openaiPlatformAPIURL
 	switch account.Type {
 	case AccountTypeOAuth:
@@ -2664,7 +2760,27 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	}
 	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	method := http.MethodPost
+	if c != nil && c.Request != nil {
+		if candidate := strings.TrimSpace(c.Request.Method); candidate != "" {
+			method = candidate
+		}
+		if c.Request.URL != nil {
+			if rawQuery := strings.TrimSpace(c.Request.URL.RawQuery); rawQuery != "" {
+				separator := "?"
+				if strings.Contains(targetURL, "?") {
+					separator = "&"
+				}
+				targetURL += separator + rawQuery
+			}
+		}
+	}
+
+	var requestBody io.Reader
+	if method != http.MethodGet && method != http.MethodHead {
+		requestBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, requestBody)
 	if err != nil {
 		return nil, err
 	}
@@ -2709,7 +2825,11 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 				clientSessionID = resolveOpenAICompactSessionID(c)
 			}
 		} else if req.Header.Get("accept") == "" {
-			req.Header.Set("accept", "text/event-stream")
+			if openAIResponsesRetrieveStreams(c) {
+				req.Header.Set("accept", "text/event-stream")
+			} else {
+				req.Header.Set("accept", "application/json")
+			}
 		}
 		if req.Header.Get("OpenAI-Beta") == "" {
 			req.Header.Set("OpenAI-Beta", "responses=experimental")
@@ -2745,7 +2865,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 		req.Header.Set("user-agent", codexCLIUserAgent)
 	}
 
-	if req.Header.Get("content-type") == "" {
+	if req.Header.Get("content-type") == "" && method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("content-type", "application/json")
 	}
 
@@ -3145,6 +3265,12 @@ func writeOpenAIPassthroughResponseHeaders(dst http.Header, src http.Header, fil
 }
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
+	if sanitizedBody, _, err := sanitizeOpenAIResponsesRequestBody(body); err != nil {
+		return nil, fmt.Errorf("sanitize responses request: %w", err)
+	} else {
+		body = sanitizedBody
+	}
+
 	// Determine target URL based on account type
 	var targetURL string
 	switch account.Type {
@@ -4330,6 +4456,21 @@ func resolveOpenAICompactSessionID(c *gin.Context) string {
 		}
 	}
 	return uuid.NewString()
+}
+
+func openAIResponsesRetrieveStreams(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	streamValue := strings.TrimSpace(c.Request.URL.Query().Get("stream"))
+	if streamValue == "" {
+		return false
+	}
+	stream, err := strconv.ParseBool(streamValue)
+	if err != nil {
+		return false
+	}
+	return stream
 }
 
 func openAIResponsesRequestPathSuffix(c *gin.Context) string {

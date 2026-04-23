@@ -37,8 +37,15 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 		switch item.Type {
 		case "message":
 			for _, part := range item.Content {
-				if part.Type == "output_text" && part.Text != "" {
-					contentText += part.Text
+				switch part.Type {
+				case "output_text":
+					if part.Text != "" {
+						contentText += part.Text
+					}
+				case "refusal":
+					if part.Refusal != "" {
+						contentText += part.Refusal
+					}
 				}
 			}
 		case "function_call":
@@ -150,16 +157,20 @@ func ResponsesEventToChatChunks(evt *ResponsesStreamEvent, state *ResponsesEvent
 	switch evt.Type {
 	case "response.created":
 		return resToChatHandleCreated(evt, state)
+	case "response.content_part.added":
+		return resToChatHandleContentPartAdded(evt, state)
 	case "response.output_text.delta":
 		return resToChatHandleTextDelta(evt, state)
 	case "response.output_item.added":
 		return resToChatHandleOutputItemAdded(evt, state)
 	case "response.function_call_arguments.delta":
 		return resToChatHandleFuncArgsDelta(evt, state)
-	case "response.reasoning_summary_text.delta":
+	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 		return resToChatHandleReasoningDelta(evt, state)
-	case "response.reasoning_summary_text.done":
+	case "response.reasoning_text.done", "response.reasoning_summary_text.done", "response.content_part.done", "response.refusal.done":
 		return nil
+	case "response.refusal.delta":
+		return resToChatHandleRefusalDelta(evt, state)
 	case "response.completed", "response.incomplete", "response.failed":
 		return resToChatHandleCompleted(evt, state)
 	default:
@@ -226,6 +237,69 @@ func resToChatHandleCreated(evt *ResponsesStreamEvent, state *ResponsesEventToCh
 
 	role := "assistant"
 	return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{Role: role})}
+}
+
+func resToChatHandleContentPartAdded(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
+	part := decodeChatResponsesPart(evt.Part)
+	if part == nil {
+		return nil
+	}
+
+	switch part.Type {
+	case "output_text":
+		if part.Text == "" {
+			return nil
+		}
+		clone := *evt
+		clone.Delta = part.Text
+		return resToChatHandleTextDelta(&clone, state)
+	case "refusal":
+		text := part.Refusal
+		if text == "" {
+			text = part.Text
+		}
+		if text == "" {
+			return nil
+		}
+		clone := *evt
+		clone.Delta = text
+		clone.Refusal = text
+		return resToChatHandleRefusalDelta(&clone, state)
+	default:
+		return nil
+	}
+}
+
+func resToChatHandleRefusalDelta(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
+	text := evt.Delta
+	if text == "" {
+		text = evt.Refusal
+	}
+	if text == "" {
+		return nil
+	}
+	return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{Content: &text})}
+}
+
+func decodeChatResponsesPart(raw json.RawMessage) *ResponsesOutputPart {
+	if len(raw) == 0 {
+		return nil
+	}
+	var part ResponsesOutputPart
+	if err := json.Unmarshal(raw, &part); err == nil && part.Type != "" {
+		return &part
+	}
+	var contentPart ResponsesContentPart
+	if err := json.Unmarshal(raw, &contentPart); err == nil && contentPart.Type != "" {
+		return &ResponsesOutputPart{
+			Type:        contentPart.Type,
+			Text:        contentPart.Text,
+			Refusal:     contentPart.Refusal,
+			Annotations: contentPart.Annotations,
+			RawPart:     raw,
+		}
+	}
+	return nil
 }
 
 func resToChatHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
@@ -389,7 +463,7 @@ type bufferedFuncCall struct {
 // so that non-streaming handlers can reconstruct output when the terminal event
 // (response.completed / response.done) carries an empty output array.
 type BufferedResponseAccumulator struct {
-	text                 strings.Builder
+	messageParts         []ResponsesContentPart
 	reasoning            strings.Builder
 	funcCalls            []bufferedFuncCall
 	outputIndexToFuncIdx map[int]int
@@ -407,9 +481,57 @@ func NewBufferedResponseAccumulator() *BufferedResponseAccumulator {
 // are handled; all other event types are silently ignored.
 func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) {
 	switch event.Type {
+	case "response.content_part.added":
+		part := decodeChatResponsesPart(event.Part)
+		if part == nil {
+			return
+		}
+		msgPart := a.ensureMessagePart(event.ContentIndex, part.Type)
+		switch part.Type {
+		case "output_text":
+			if part.Text != "" {
+				msgPart.Text += part.Text
+			}
+		case "refusal":
+			text := part.Refusal
+			if text == "" {
+				text = part.Text
+			}
+			if text != "" {
+				msgPart.Refusal += text
+			}
+		}
 	case "response.output_text.delta":
 		if event.Delta != "" {
-			_, _ = a.text.WriteString(event.Delta)
+			msgPart := a.ensureMessagePart(event.ContentIndex, "output_text")
+			msgPart.Text += event.Delta
+		}
+	case "response.output_text.done":
+		if event.Text != "" {
+			msgPart := a.ensureMessagePart(event.ContentIndex, "output_text")
+			if msgPart.Text == "" {
+				msgPart.Text = event.Text
+			}
+		}
+	case "response.refusal.delta":
+		text := event.Delta
+		if text == "" {
+			text = event.Refusal
+		}
+		if text != "" {
+			msgPart := a.ensureMessagePart(event.ContentIndex, "refusal")
+			msgPart.Refusal += text
+		}
+	case "response.refusal.done":
+		text := event.Refusal
+		if text == "" {
+			text = event.Text
+		}
+		if text != "" {
+			msgPart := a.ensureMessagePart(event.ContentIndex, "refusal")
+			if msgPart.Refusal == "" {
+				msgPart.Refusal = text
+			}
 		}
 	case "response.output_item.added":
 		if event.Item != nil && event.Item.Type == "function_call" {
@@ -426,16 +548,45 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 				_, _ = a.funcCalls[idx].Args.WriteString(event.Delta)
 			}
 		}
-	case "response.reasoning_summary_text.delta":
+	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 		if event.Delta != "" {
 			_, _ = a.reasoning.WriteString(event.Delta)
 		}
 	}
 }
 
+func (a *BufferedResponseAccumulator) ensureMessagePart(contentIndex int, partType string) *ResponsesContentPart {
+	if contentIndex < 0 {
+		contentIndex = len(a.messageParts)
+	}
+	for len(a.messageParts) <= contentIndex {
+		a.messageParts = append(a.messageParts, ResponsesContentPart{})
+	}
+	part := &a.messageParts[contentIndex]
+	if part.Type == "" {
+		part.Type = partType
+	}
+	return part
+}
+
 // HasContent reports whether any content has been accumulated.
 func (a *BufferedResponseAccumulator) HasContent() bool {
-	return a.text.Len() > 0 || len(a.funcCalls) > 0 || a.reasoning.Len() > 0
+	if len(a.funcCalls) > 0 || a.reasoning.Len() > 0 {
+		return true
+	}
+	for _, part := range a.messageParts {
+		switch part.Type {
+		case "output_text":
+			if part.Text != "" {
+				return true
+			}
+		case "refusal":
+			if part.Refusal != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // BuildOutput constructs a []ResponsesOutput from the accumulated delta
@@ -454,14 +605,24 @@ func (a *BufferedResponseAccumulator) BuildOutput() []ResponsesOutput {
 		})
 	}
 
-	if a.text.Len() > 0 {
+	var messageContent []ResponsesContentPart
+	for _, part := range a.messageParts {
+		switch part.Type {
+		case "output_text":
+			if part.Text != "" {
+				messageContent = append(messageContent, ResponsesContentPart{Type: "output_text", Text: part.Text})
+			}
+		case "refusal":
+			if part.Refusal != "" {
+				messageContent = append(messageContent, ResponsesContentPart{Type: "refusal", Refusal: part.Refusal})
+			}
+		}
+	}
+	if len(messageContent) > 0 {
 		out = append(out, ResponsesOutput{
-			Type: "message",
-			Role: "assistant",
-			Content: []ResponsesContentPart{{
-				Type: "output_text",
-				Text: a.text.String(),
-			}},
+			Type:    "message",
+			Role:    "assistant",
+			Content: messageContent,
 		})
 	}
 

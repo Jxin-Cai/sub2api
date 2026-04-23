@@ -565,6 +565,34 @@ func (h *UsageHandler) CreateCleanupTask(c *gin.Context) {
 	})
 }
 
+// RetryCleanupTask handles retrying a failed usage cleanup task
+// POST /api/v1/admin/usage/cleanup-tasks/:id/retry
+func (h *UsageHandler) RetryCleanupTask(c *gin.Context) {
+	if h.cleanupService == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Usage cleanup service unavailable")
+		return
+	}
+	subject, ok := middleware.GetAuthSubjectFromContext(c)
+	if !ok || subject.UserID <= 0 {
+		response.Unauthorized(c, "Unauthorized")
+		return
+	}
+	idStr := strings.TrimSpace(c.Param("id"))
+	taskID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || taskID <= 0 {
+		response.BadRequest(c, "Invalid task id")
+		return
+	}
+	logger.LegacyPrintf("handler.admin.usage", "[UsageCleanup] 请求重试清理任务: task=%d operator=%d", taskID, subject.UserID)
+	if err := h.cleanupService.RetryTask(c.Request.Context(), taskID, subject.UserID); err != nil {
+		logger.LegacyPrintf("handler.admin.usage", "[UsageCleanup] 重试清理任务失败: task=%d operator=%d err=%v", taskID, subject.UserID, err)
+		response.ErrorFrom(c, err)
+		return
+	}
+	logger.LegacyPrintf("handler.admin.usage", "[UsageCleanup] 清理任务已重试: task=%d operator=%d", taskID, subject.UserID)
+	response.Success(c, gin.H{"id": taskID, "status": service.UsageCleanupStatusPending})
+}
+
 // CancelCleanupTask handles canceling a usage cleanup task
 // POST /api/v1/admin/usage/cleanup-tasks/:id/cancel
 func (h *UsageHandler) CancelCleanupTask(c *gin.Context) {

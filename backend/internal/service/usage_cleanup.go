@@ -69,6 +69,8 @@ type UsageCleanupRepository interface {
 	UpdateTaskProgress(ctx context.Context, taskID int64, deletedRows int64) error
 	// CancelTask 将任务标记为 canceled（仅允许 pending/running）
 	CancelTask(ctx context.Context, taskID int64, canceledBy int64) (bool, error)
+	// RetryTask 将 failed 任务重置为 pending（仅允许 failed）
+	RetryTask(ctx context.Context, taskID int64) (bool, error)
 	MarkTaskSucceeded(ctx context.Context, taskID int64, deletedRows int64) error
 	MarkTaskFailed(ctx context.Context, taskID int64, deletedRows int64, errorMsg string) error
 	DeleteUsageLogsBatch(ctx context.Context, filters UsageCleanupFilters, limit int) (int64, error)

@@ -300,8 +300,13 @@ func TestParseUsageAndEnrichCoverage(t *testing.T) {
 	enrichResult(result, state, 5*time.Millisecond)
 	require.Equal(t, state.usage.InputTokens, result.Usage.InputTokens)
 	require.Equal(t, 5*time.Millisecond, result.Duration)
+	parseUsageAndAccumulate(state, []byte(`{"type":"response.incomplete","response":{"usage":{"input_tokens":4,"output_tokens":3,"input_tokens_details":{"cached_tokens":2}}}}`), "response.incomplete", nil)
+	require.Equal(t, 6, state.usage.InputTokens)
+	require.Equal(t, 4, state.usage.OutputTokens)
+	require.Equal(t, 3, state.usage.CacheReadInputTokens)
+
 	parseUsageAndAccumulate(state, []byte(`{"type":"response.in_progress","response":{"usage":{"input_tokens":9}}}`), "response.in_progress", nil)
-	require.Equal(t, 2, state.usage.InputTokens)
+	require.Equal(t, 6, state.usage.InputTokens)
 	enrichResult(nil, state, 0)
 }
 
@@ -366,6 +371,17 @@ func TestIsTokenEventCoverageBranches(t *testing.T) {
 	require.True(t, isTokenEvent("response.output_audio.delta"))
 	require.True(t, isTokenEvent("response.output"))
 	require.True(t, isTokenEvent("response.done"))
+}
+
+func TestShouldParseUsageCoverageBranches(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, shouldParseUsage("response.completed"))
+	require.True(t, shouldParseUsage("response.incomplete"))
+	require.True(t, shouldParseUsage("response.failed"))
+	require.True(t, shouldParseUsage("response.cancelled"))
+	require.True(t, shouldParseUsage("response.canceled"))
+	require.False(t, shouldParseUsage("response.in_progress"))
 }
 
 func TestRelayTurnTimingHelpersCoverage(t *testing.T) {

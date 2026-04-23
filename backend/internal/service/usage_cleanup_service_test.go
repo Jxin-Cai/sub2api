@@ -52,6 +52,9 @@ type cleanupRepoStub struct {
 	cancelCalls   []int64
 	cancelErr     error
 	cancelResult  *bool
+	retryCalls    []int64
+	retryErr      error
+	retryResult   *bool
 	markFailedErr error
 }
 
@@ -191,6 +194,33 @@ func (s *cleanupRepoStub) CancelTask(ctx context.Context, taskID int64, canceled
 		return false, nil
 	}
 	s.statusByID[taskID] = UsageCleanupStatusCanceled
+	return true, nil
+}
+
+func (s *cleanupRepoStub) RetryTask(ctx context.Context, taskID int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retryCalls = append(s.retryCalls, taskID)
+	if s.retryErr != nil {
+		return false, s.retryErr
+	}
+	if s.retryResult != nil {
+		ok := *s.retryResult
+		if ok {
+			if s.statusByID == nil {
+				s.statusByID = map[int64]string{}
+			}
+			s.statusByID[taskID] = UsageCleanupStatusPending
+		}
+		return ok, nil
+	}
+	if s.statusByID == nil {
+		s.statusByID = map[int64]string{}
+	}
+	if s.statusByID[taskID] != UsageCleanupStatusFailed {
+		return false, nil
+	}
+	s.statusByID[taskID] = UsageCleanupStatusPending
 	return true, nil
 }
 
@@ -889,4 +919,37 @@ func TestUsageCleanupServiceIsTaskCanceledError(t *testing.T) {
 	_, err := svc.isTaskCanceled(context.Background(), 9)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "status err")
+}
+
+func TestUsageCleanupServiceRetryTaskSuccess(t *testing.T) {
+	repo := &cleanupRepoStub{
+		statusByID: map[int64]string{
+			9: UsageCleanupStatusFailed,
+		},
+	}
+	cfg := &config.Config{UsageCleanup: config.UsageCleanupConfig{Enabled: true}}
+	svc := NewUsageCleanupService(repo, nil, nil, cfg)
+
+	err := svc.RetryTask(context.Background(), 9, 1)
+	require.NoError(t, err)
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	require.Equal(t, UsageCleanupStatusPending, repo.statusByID[9])
+	require.Len(t, repo.retryCalls, 1)
+}
+
+func TestUsageCleanupServiceRetryTaskConflict(t *testing.T) {
+	repo := &cleanupRepoStub{
+		statusByID: map[int64]string{
+			9: UsageCleanupStatusSucceeded,
+		},
+	}
+	cfg := &config.Config{UsageCleanup: config.UsageCleanupConfig{Enabled: true}}
+	svc := NewUsageCleanupService(repo, nil, nil, cfg)
+
+	err := svc.RetryTask(context.Background(), 9, 1)
+	require.Error(t, err)
+	require.Equal(t, http.StatusConflict, infraerrors.Code(err))
+	require.Equal(t, "USAGE_CLEANUP_RETRY_CONFLICT", infraerrors.Reason(err))
 }

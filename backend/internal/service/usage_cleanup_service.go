@@ -347,6 +347,50 @@ func (s *UsageCleanupService) CancelTask(ctx context.Context, taskID int64, canc
 	return nil
 }
 
+func (s *UsageCleanupService) RetryTask(ctx context.Context, taskID int64, retriedBy int64) error {
+	if s == nil || s.repo == nil {
+		return fmt.Errorf("cleanup service not ready")
+	}
+	if s.cfg != nil && !s.cfg.UsageCleanup.Enabled {
+		return infraerrors.New(http.StatusServiceUnavailable, "USAGE_CLEANUP_DISABLED", "usage cleanup is disabled")
+	}
+	if retriedBy <= 0 {
+		return infraerrors.BadRequest("USAGE_CLEANUP_INVALID_RETRIER", "invalid retrier")
+	}
+	status, err := s.repo.GetTaskStatus(ctx, taskID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return infraerrors.New(http.StatusNotFound, "USAGE_CLEANUP_TASK_NOT_FOUND", "cleanup task not found")
+		}
+		return err
+	}
+	logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] retry_task requested: task=%d operator=%d status=%s", taskID, retriedBy, status)
+	if status == UsageCleanupStatusPending || status == UsageCleanupStatusRunning {
+		logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] retry_task idempotent hit: task=%d operator=%d status=%s", taskID, retriedBy, status)
+		go s.runOnce()
+		return nil
+	}
+	if status != UsageCleanupStatusFailed {
+		return infraerrors.New(http.StatusConflict, "USAGE_CLEANUP_RETRY_CONFLICT", "cleanup task cannot be retried in current status")
+	}
+	ok, err := s.repo.RetryTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		currentStatus, getErr := s.repo.GetTaskStatus(ctx, taskID)
+		if getErr == nil && (currentStatus == UsageCleanupStatusPending || currentStatus == UsageCleanupStatusRunning) {
+			logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] retry_task idempotent race hit: task=%d operator=%d status=%s", taskID, retriedBy, currentStatus)
+			go s.runOnce()
+			return nil
+		}
+		return infraerrors.New(http.StatusConflict, "USAGE_CLEANUP_RETRY_CONFLICT", "cleanup task cannot be retried in current status")
+	}
+	logger.LegacyPrintf("service.usage_cleanup", "[UsageCleanup] retry_task done: task=%d operator=%d", taskID, retriedBy)
+	go s.runOnce()
+	return nil
+}
+
 func sanitizeUsageCleanupFilters(filters *UsageCleanupFilters) {
 	if filters == nil {
 		return

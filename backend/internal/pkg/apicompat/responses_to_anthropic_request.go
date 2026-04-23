@@ -24,25 +24,36 @@ func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, erro
 		Stream:      req.Stream,
 	}
 
+	if len(req.Metadata) > 0 {
+		out.Metadata = req.Metadata
+	}
+	if req.ServiceTier != "" {
+		out.ServiceTier = req.ServiceTier
+	}
+	if len(req.ContextManagement) > 0 {
+		out.ContextManagement = responsesContextManagementToAnthropic(req.ContextManagement)
+	}
+	if len(req.Conversation) > 0 {
+		out.Container = req.Conversation
+	}
+
 	if len(system) > 0 {
 		out.System = system
 	}
 
-	// max_output_tokens → max_tokens
 	if req.MaxOutputTokens != nil && *req.MaxOutputTokens > 0 {
 		out.MaxTokens = *req.MaxOutputTokens
 	}
 	if out.MaxTokens == 0 {
-		// Anthropic requires max_tokens; default to a sensible value.
 		out.MaxTokens = 8192
 	}
 
-	// Convert tools
 	if len(req.Tools) > 0 {
-		out.Tools = convertResponsesToAnthropicTools(req.Tools)
+		anthTools, mcpServers := convertResponsesToAnthropicTools(req.Tools)
+		out.Tools = anthTools
+		out.MCPServers = mcpServers
 	}
 
-	// Convert tool_choice (reverse of convertAnthropicToolChoiceToResponses)
 	if len(req.ToolChoice) > 0 {
 		tc, err := convertResponsesToAnthropicToolChoice(req.ToolChoice)
 		if err != nil {
@@ -51,11 +62,9 @@ func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, erro
 		out.ToolChoice = tc
 	}
 
-	// reasoning.effort → output_config.effort + thinking
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
 		effort := mapResponsesEffortToAnthropic(req.Reasoning.Effort)
 		out.OutputConfig = &AnthropicOutputConfig{Effort: effort}
-		// Enable thinking for non-low efforts
 		if effort != "low" {
 			out.Thinking = &AnthropicThinking{
 				Type:         "enabled",
@@ -85,23 +94,16 @@ func defaultThinkingBudget(effort string) int {
 
 // mapResponsesEffortToAnthropic converts OpenAI Responses reasoning effort to
 // Anthropic effort levels. Reverse of mapAnthropicEffortToResponses.
-//
-//	low    → low
-//	medium → medium
-//	high   → high
-//	xhigh  → max
 func mapResponsesEffortToAnthropic(effort string) string {
 	if effort == "xhigh" {
 		return "max"
 	}
-	return effort // low→low, medium→medium, high→high, unknown→passthrough
+	return effort
 }
 
 // convertResponsesInputToAnthropic extracts system prompt and messages from
-// a Responses API input array. Returns the system as raw JSON (for Anthropic's
-// polymorphic system field) and a list of Anthropic messages.
+// a Responses API input array. Returns the system as raw JSON and a list of messages.
 func convertResponsesInputToAnthropic(inputRaw json.RawMessage) (json.RawMessage, []AnthropicMessage, error) {
-	// Try as plain string input.
 	var inputStr string
 	if err := json.Unmarshal(inputRaw, &inputStr); err == nil {
 		content, _ := json.Marshal(inputStr)
@@ -119,83 +121,113 @@ func convertResponsesInputToAnthropic(inputRaw json.RawMessage) (json.RawMessage
 	for _, item := range items {
 		switch {
 		case item.Role == "system":
-			// System prompt → Anthropic system field
 			text := extractTextFromContent(item.Content)
 			if text != "" {
 				system, _ = json.Marshal(text)
 			}
 
 		case item.Type == "function_call":
-			// function_call → assistant message with tool_use block
 			input := json.RawMessage("{}")
 			if item.Arguments != "" {
 				input = json.RawMessage(item.Arguments)
 			}
+			blockType := "tool_use"
+			if isResponsesMCPNamespace(item.Namespace, item.RawItem) {
+				blockType = "mcp_tool_use"
+			}
 			block := AnthropicContentBlock{
-				Type:  "tool_use",
-				ID:    fromResponsesCallIDToAnthropic(item.CallID),
-				Name:  item.Name,
-				Input: input,
+				Type:       blockType,
+				ID:         fromResponsesCallIDToAnthropic(item.CallID),
+				Name:       item.Name,
+				ServerName: item.Namespace,
+				Input:      input,
 			}
 			blockJSON, _ := json.Marshal([]AnthropicContentBlock{block})
-			messages = append(messages, AnthropicMessage{
-				Role:    "assistant",
-				Content: blockJSON,
-			})
+			messages = append(messages, AnthropicMessage{Role: "assistant", Content: blockJSON})
 
 		case item.Type == "function_call_output":
-			// function_call_output → user message with tool_result block
-			outputContent := item.Output
-			if outputContent == "" {
-				outputContent = "(empty)"
+			contentJSON := item.OutputRaw
+			if len(contentJSON) == 0 {
+				outputContent := item.Output
+				if outputContent == "" {
+					outputContent = "(empty)"
+				}
+				contentJSON, _ = json.Marshal(outputContent)
 			}
-			contentJSON, _ := json.Marshal(outputContent)
+			blockType := "tool_result"
+			if isResponsesMCPNamespace(item.Namespace, item.RawItem) {
+				blockType = "mcp_tool_result"
+			}
 			block := AnthropicContentBlock{
-				Type:      "tool_result",
+				Type:      blockType,
 				ToolUseID: fromResponsesCallIDToAnthropic(item.CallID),
 				Content:   contentJSON,
+				IsError:   item.Status == "incomplete",
 			}
 			blockJSON, _ := json.Marshal([]AnthropicContentBlock{block})
-			messages = append(messages, AnthropicMessage{
-				Role:    "user",
-				Content: blockJSON,
-			})
+			messages = append(messages, AnthropicMessage{Role: "user", Content: blockJSON})
 
 		case item.Role == "user":
 			content, err := convertResponsesUserToAnthropicContent(item.Content)
 			if err != nil {
 				return nil, nil, err
 			}
-			messages = append(messages, AnthropicMessage{
-				Role:    "user",
-				Content: content,
-			})
+			messages = append(messages, AnthropicMessage{Role: "user", Content: content})
 
 		case item.Role == "assistant":
 			content, err := convertResponsesAssistantToAnthropicContent(item.Content)
 			if err != nil {
 				return nil, nil, err
 			}
-			messages = append(messages, AnthropicMessage{
-				Role:    "assistant",
-				Content: content,
-			})
+			messages = append(messages, AnthropicMessage{Role: "assistant", Content: content})
 
 		default:
-			// Unknown role/type — attempt as user message
 			if item.Content != nil {
-				messages = append(messages, AnthropicMessage{
-					Role:    "user",
-					Content: item.Content,
-				})
+				messages = append(messages, AnthropicMessage{Role: "user", Content: item.Content})
 			}
 		}
 	}
 
-	// Merge consecutive same-role messages (Anthropic requires alternating roles)
 	messages = mergeConsecutiveMessages(messages)
-
 	return system, messages, nil
+}
+
+func responsesContextManagementToAnthropic(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var edits []json.RawMessage
+	if err := json.Unmarshal(raw, &edits); err == nil {
+		if len(edits) == 0 {
+			return nil
+		}
+		encoded, err := json.Marshal(map[string]any{"edits": edits})
+		if err == nil {
+			return encoded
+		}
+		return nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err == nil {
+		return raw
+	}
+	return nil
+}
+
+func isResponsesMCPNamespace(namespace string, raw json.RawMessage) bool {
+	if namespace != "" && namespace != "mcp" {
+		return true
+	}
+	if len(raw) == 0 {
+		return false
+	}
+	var item struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return false
+	}
+	return item.Type == "mcp_tool_use" || item.Type == "mcp_tool_result"
 }
 
 // extractTextFromContent extracts text from a content field that may be a
@@ -225,19 +257,16 @@ func extractTextFromContent(raw json.RawMessage) string {
 // content field into Anthropic content blocks JSON.
 func convertResponsesUserToAnthropicContent(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
-		return json.Marshal("") // empty string content
+		return json.Marshal("")
 	}
 
-	// Try plain string.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return json.Marshal(s)
 	}
 
-	// Array of content parts → Anthropic content blocks.
 	var parts []ResponsesContentPart
 	if err := json.Unmarshal(raw, &parts); err != nil {
-		// Pass through as-is if we can't parse
 		return raw, nil
 	}
 
@@ -246,18 +275,12 @@ func convertResponsesUserToAnthropicContent(raw json.RawMessage) (json.RawMessag
 		switch p.Type {
 		case "input_text", "text":
 			if p.Text != "" {
-				blocks = append(blocks, AnthropicContentBlock{
-					Type: "text",
-					Text: p.Text,
-				})
+				blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: p.Text})
 			}
 		case "input_image":
 			src := dataURIToAnthropicImageSource(p.ImageURL)
 			if src != nil {
-				blocks = append(blocks, AnthropicContentBlock{
-					Type:   "image",
-					Source: src,
-				})
+				blocks = append(blocks, AnthropicContentBlock{Type: "image", Source: src})
 			}
 		}
 	}
@@ -275,13 +298,11 @@ func convertResponsesAssistantToAnthropicContent(raw json.RawMessage) (json.RawM
 		return json.Marshal([]AnthropicContentBlock{{Type: "text", Text: ""}})
 	}
 
-	// Try plain string.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return json.Marshal([]AnthropicContentBlock{{Type: "text", Text: s}})
 	}
 
-	// Array of content parts → Anthropic content blocks.
 	var parts []ResponsesContentPart
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return raw, nil
@@ -292,10 +313,7 @@ func convertResponsesAssistantToAnthropicContent(raw json.RawMessage) (json.RawM
 		switch p.Type {
 		case "output_text", "text":
 			if p.Text != "" {
-				blocks = append(blocks, AnthropicContentBlock{
-					Type: "text",
-					Text: p.Text,
-				})
+				blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: p.Text})
 			}
 		}
 	}
@@ -306,8 +324,7 @@ func convertResponsesAssistantToAnthropicContent(raw json.RawMessage) (json.RawM
 	return json.Marshal(blocks)
 }
 
-// fromResponsesCallIDToAnthropic converts an OpenAI function call ID back to
-// Anthropic format. IDs are passed through as-is since we no longer add prefixes.
+// fromResponsesCallIDToAnthropic converts an OpenAI function call ID back to Anthropic format.
 func fromResponsesCallIDToAnthropic(id string) string {
 	return id
 }
@@ -317,7 +334,6 @@ func dataURIToAnthropicImageSource(dataURI string) *AnthropicImageSource {
 	if !strings.HasPrefix(dataURI, "data:") {
 		return nil
 	}
-	// Format: data:<media_type>;base64,<data>
 	rest := strings.TrimPrefix(dataURI, "data:")
 	semicolonIdx := strings.Index(rest, ";")
 	if semicolonIdx < 0 {
@@ -329,15 +345,10 @@ func dataURIToAnthropicImageSource(dataURI string) *AnthropicImageSource {
 		return nil
 	}
 	data := strings.TrimPrefix(rest, "base64,")
-	return &AnthropicImageSource{
-		Type:      "base64",
-		MediaType: mediaType,
-		Data:      data,
-	}
+	return &AnthropicImageSource{Type: "base64", MediaType: mediaType, Data: data}
 }
 
-// mergeConsecutiveMessages merges consecutive messages with the same role
-// because Anthropic requires alternating user/assistant turns.
+// mergeConsecutiveMessages merges consecutive messages with the same role because Anthropic requires alternating turns.
 func mergeConsecutiveMessages(messages []AnthropicMessage) []AnthropicMessage {
 	if len(messages) <= 1 {
 		return messages
@@ -350,7 +361,6 @@ func mergeConsecutiveMessages(messages []AnthropicMessage) []AnthropicMessage {
 			continue
 		}
 
-		// Same role — merge content arrays
 		last := &merged[len(merged)-1]
 		lastBlocks := parseContentBlocks(last.Content)
 		newBlocks := parseContentBlocks(msg.Content)
@@ -361,7 +371,6 @@ func mergeConsecutiveMessages(messages []AnthropicMessage) []AnthropicMessage {
 }
 
 // parseContentBlocks attempts to parse content as []AnthropicContentBlock.
-// If it's a string, wraps it in a text block.
 func parseContentBlocks(raw json.RawMessage) []AnthropicContentBlock {
 	var blocks []AnthropicContentBlock
 	if err := json.Unmarshal(raw, &blocks); err == nil {
@@ -375,16 +384,19 @@ func parseContentBlocks(raw json.RawMessage) []AnthropicContentBlock {
 }
 
 // convertResponsesToAnthropicTools maps Responses API tools to Anthropic format.
-// Reverse of convertAnthropicToolsToResponses.
-func convertResponsesToAnthropicTools(tools []ResponsesTool) []AnthropicTool {
+func convertResponsesToAnthropicTools(tools []ResponsesTool) ([]AnthropicTool, []AnthropicMCPServer) {
 	var out []AnthropicTool
+	var mcpServers []AnthropicMCPServer
 	for _, t := range tools {
 		switch t.Type {
 		case "web_search":
-			out = append(out, AnthropicTool{
-				Type: "web_search_20250305",
-				Name: "web_search",
-			})
+			out = append(out, AnthropicTool{Type: "web_search_20250305", Name: "web_search"})
+		case "code_interpreter", "code_execution":
+			out = append(out, AnthropicTool{Type: "code_execution_20260120", Name: t.Name, InputSchema: t.Parameters})
+		case "mcp":
+			server, toolset := convertResponsesMCPToolToAnthropic(t)
+			mcpServers = append(mcpServers, server)
+			out = append(out, toolset)
 		case "function":
 			out = append(out, AnthropicTool{
 				Name:        t.Name,
@@ -392,7 +404,6 @@ func convertResponsesToAnthropicTools(tools []ResponsesTool) []AnthropicTool {
 				InputSchema: normalizeAnthropicInputSchema(t.Parameters),
 			})
 		default:
-			// Pass through unknown tool types
 			out = append(out, AnthropicTool{
 				Type:        t.Type,
 				Name:        t.Name,
@@ -401,10 +412,51 @@ func convertResponsesToAnthropicTools(tools []ResponsesTool) []AnthropicTool {
 			})
 		}
 	}
-	return out
+	return out, mcpServers
 }
 
-// normalizeAnthropicInputSchema ensures the input_schema has a "type" field.
+func convertResponsesMCPToolToAnthropic(tool ResponsesTool) (AnthropicMCPServer, AnthropicTool) {
+	serverName := strings.TrimSpace(tool.ServerLabel)
+	if serverName == "" {
+		serverName = strings.TrimSpace(tool.ConnectorID)
+	}
+	if serverName == "" {
+		serverName = "mcp-server"
+	}
+
+	server := AnthropicMCPServer{
+		Type:               "url",
+		URL:                tool.ServerURL,
+		Name:               serverName,
+		AuthorizationToken: tool.Authorization,
+	}
+	toolset := AnthropicTool{Type: "mcp_toolset", MCPServerName: serverName}
+
+	if len(tool.Parameters) > 0 {
+		var params map[string]json.RawMessage
+		if json.Unmarshal(tool.Parameters, &params) == nil {
+			toolset.DefaultConfig = params["default_config"]
+			toolset.Configs = params["configs"]
+			toolset.CacheControl = params["cache_control"]
+		}
+	}
+
+	if len(tool.AllowedTools) > 0 && len(toolset.Configs) == 0 {
+		var allowed []string
+		if json.Unmarshal(tool.AllowedTools, &allowed) == nil && len(allowed) > 0 {
+			toolset.DefaultConfig = json.RawMessage(`{"enabled":false}`)
+			configs := make(map[string]map[string]bool, len(allowed))
+			for _, name := range allowed {
+				configs[name] = map[string]bool{"enabled": true}
+			}
+			toolset.Configs, _ = json.Marshal(configs)
+		}
+	}
+
+	return server, toolset
+}
+
+// normalizeAnthropicInputSchema ensures the input_schema has a type field.
 func normalizeAnthropicInputSchema(schema json.RawMessage) json.RawMessage {
 	if len(schema) == 0 || string(schema) == "null" {
 		return json.RawMessage(`{"type":"object","properties":{}}`)
@@ -413,14 +465,7 @@ func normalizeAnthropicInputSchema(schema json.RawMessage) json.RawMessage {
 }
 
 // convertResponsesToAnthropicToolChoice maps Responses tool_choice to Anthropic format.
-// Reverse of convertAnthropicToolChoiceToResponses.
-//
-//	"auto"                                     → {"type":"auto"}
-//	"required"                                 → {"type":"any"}
-//	"none"                                     → {"type":"none"}
-//	{"type":"function","function":{"name":"X"}} → {"type":"tool","name":"X"}
 func convertResponsesToAnthropicToolChoice(raw json.RawMessage) (json.RawMessage, error) {
-	// Try as string first
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		switch s {
@@ -435,7 +480,6 @@ func convertResponsesToAnthropicToolChoice(raw json.RawMessage) (json.RawMessage
 		}
 	}
 
-	// Try as object with type=function
 	var tc struct {
 		Type     string `json:"type"`
 		Function struct {
@@ -443,12 +487,8 @@ func convertResponsesToAnthropicToolChoice(raw json.RawMessage) (json.RawMessage
 		} `json:"function"`
 	}
 	if err := json.Unmarshal(raw, &tc); err == nil && tc.Type == "function" && tc.Function.Name != "" {
-		return json.Marshal(map[string]string{
-			"type": "tool",
-			"name": tc.Function.Name,
-		})
+		return json.Marshal(map[string]string{"type": "tool", "name": tc.Function.Name})
 	}
 
-	// Pass through unknown
 	return raw, nil
 }

@@ -547,3 +547,41 @@ func TestIsInstructionsEmpty(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyCodexOAuthTransform_StripsCompatOnlyResponsesFields(t *testing.T) {
+	reqBody := map[string]any{
+		"model": "gpt-5.2",
+		"input": []any{
+			map[string]any{
+				"type":       "function_call_output",
+				"call_id":    "call_1",
+				"output":     "ok",
+				"output_raw": []any{map[string]any{"type": "text", "text": "ok"}},
+				"namespace":  "mcp",
+				"item":       map[string]any{"type": "mcp_tool_result"},
+			},
+		},
+		"tool_choice": map[string]any{"type": "tool", "name": "lookup"},
+		"unknown_top": true,
+	}
+
+	applyCodexOAuthTransform(reqBody, false, false)
+
+	_, hasUnknownTop := reqBody["unknown_top"]
+	require.False(t, hasUnknownTop)
+	_, hasToolChoice := reqBody["tool_choice"]
+	require.False(t, hasToolChoice)
+
+	input, ok := reqBody["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 1)
+	item, ok := input[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "ok", item["output"])
+	_, hasOutputRaw := item["output_raw"]
+	require.False(t, hasOutputRaw)
+	_, hasNamespace := item["namespace"]
+	require.False(t, hasNamespace)
+	_, hasRawItem := item["item"]
+	require.False(t, hasRawItem)
+}

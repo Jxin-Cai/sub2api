@@ -216,6 +216,10 @@ func applyCodexOAuthTransform(reqBody map[string]any, isCodexCLI bool, isCompact
 		result.Modified = true
 	}
 
+	if sanitizeOpenAIResponsesRequestMap(reqBody) {
+		result.Modified = true
+	}
+
 	return result
 }
 

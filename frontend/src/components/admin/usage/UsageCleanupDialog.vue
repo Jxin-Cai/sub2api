@@ -44,6 +44,15 @@
                   </span>
                   <span class="text-xs text-gray-400">#{{ task.id }}</span>
                   <button
+                    v-if="canRetry(task)"
+                    type="button"
+                    class="btn btn-ghost btn-xs text-emerald-600 hover:text-emerald-700 dark:text-emerald-300"
+                    :disabled="retryingTaskId === task.id"
+                    @click="retryTask(task)"
+                  >
+                    {{ t('admin.usage.cleanup.retry') }}
+                  </button>
+                  <button
                     v-if="canCancel(task)"
                     type="button"
                     class="btn btn-ghost btn-xs text-rose-600 hover:text-rose-700 dark:text-rose-300"
@@ -153,6 +162,7 @@ const submitting = ref(false)
 const confirmVisible = ref(false)
 const cancelConfirmVisible = ref(false)
 const canceling = ref(false)
+const retryingTaskId = ref<number | null>(null)
 const cancelTarget = ref<UsageCleanupTask | null>(null)
 let pollTimer: number | null = null
 
@@ -279,6 +289,10 @@ const canCancel = (task: UsageCleanupTask) => {
   return task.status === 'pending' || task.status === 'running'
 }
 
+const canRetry = (task: UsageCleanupTask) => {
+  return task.status === 'failed'
+}
+
 const openCancelConfirm = (task: UsageCleanupTask) => {
   cancelTarget.value = task
   cancelConfirmVisible.value = true
@@ -365,6 +379,20 @@ const cancelTask = async () => {
   } finally {
     canceling.value = false
     cancelTarget.value = null
+  }
+}
+
+const retryTask = async (task: UsageCleanupTask) => {
+  retryingTaskId.value = task.id
+  try {
+    await adminUsageAPI.retryCleanupTask(task.id)
+    appStore.showSuccess(t('admin.usage.cleanup.retrySuccess'))
+    loadTasks()
+  } catch (error) {
+    console.error('Failed to retry cleanup task:', error)
+    appStore.showError(t('admin.usage.cleanup.retryFailed'))
+  } finally {
+    retryingTaskId.value = null
   }
 }
 

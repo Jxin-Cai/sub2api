@@ -196,6 +196,13 @@ export async function cancelCleanupTask(taskId: number): Promise<{ id: number; s
   return data
 }
 
+export async function retryCleanupTask(taskId: number): Promise<{ id: number; status: string }> {
+  const { data } = await apiClient.post<{ id: number; status: string }>(
+    `/admin/usage/cleanup-tasks/${taskId}/retry`
+  )
+  return data
+}
+
 export const adminUsageAPI = {
   list,
   getStats,
@@ -203,7 +210,8 @@ export const adminUsageAPI = {
   searchApiKeys,
   listCleanupTasks,
   createCleanupTask,
-  cancelCleanupTask
+  cancelCleanupTask,
+  retryCleanupTask
 }
 
 export default adminUsageAPI

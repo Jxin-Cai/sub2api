@@ -8,6 +8,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func stripEmptyAnthropicFields(raw json.RawMessage) string {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return string(raw)
+	}
+	for k, v := range m {
+		if s, ok := v.(string); ok && s == "" {
+			delete(m, k)
+		}
+	}
+	out, _ := json.Marshal(m)
+	return string(out)
+}
+
 // ---------------------------------------------------------------------------
 // AnthropicToResponses tests
 // ---------------------------------------------------------------------------
@@ -743,6 +757,157 @@ func TestAnthropicToResponses_OutputConfigWithoutThinking(t *testing.T) {
 	assert.Equal(t, "detailed", resp.Reasoning.Summary)
 }
 
+func TestAnthropicEventToResponsesStream_BuildsCompletedOutput(t *testing.T) {
+	state := NewAnthropicEventToResponsesState()
+
+	events := AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &AnthropicResponse{
+			ID:    "msg_1",
+			Model: "claude-opus-4-6",
+			Usage: AnthropicUsage{InputTokens: 11},
+		},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "response.created", events[0].Type)
+
+	idx0 := 0
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:         "content_block_start",
+		Index:        &idx0,
+		ContentBlock: &AnthropicContentBlock{Type: "text"},
+	}, state)
+	require.Len(t, events, 2)
+	assert.Equal(t, "response.output_item.added", events[0].Type)
+	assert.Equal(t, "response.content_part.added", events[1].Type)
+	var part ResponsesOutputPart
+	require.NoError(t, json.Unmarshal(events[1].Part, &part))
+	assert.Equal(t, "output_text", part.Type)
+
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx0,
+		Delta: &AnthropicDelta{Type: "text_delta", Text: "Hello"},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "response.output_text.delta", events[0].Type)
+	assert.Equal(t, "Hello", events[0].Delta)
+
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:  "content_block_stop",
+		Index: &idx0,
+	}, state)
+	require.Len(t, events, 2)
+	assert.Equal(t, "response.output_text.done", events[0].Type)
+	assert.Equal(t, "response.content_part.done", events[1].Type)
+
+	idx1 := 1
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:         "content_block_start",
+		Index:        &idx1,
+		ContentBlock: &AnthropicContentBlock{Type: "thinking"},
+	}, state)
+	require.Len(t, events, 2)
+	assert.Equal(t, "response.output_item.done", events[0].Type)
+	assert.Equal(t, "response.output_item.added", events[1].Type)
+	assert.Equal(t, "reasoning", events[1].Item.Type)
+
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx1,
+		Delta: &AnthropicDelta{Type: "thinking_delta", Thinking: "Need to think"},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "response.reasoning_text.delta", events[0].Type)
+	assert.Equal(t, "Need to think", events[0].Delta)
+
+	_ = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx1,
+		Delta: &AnthropicDelta{Type: "signature_delta", Signature: "enc_data@rs_1"},
+	}, state)
+
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:  "content_block_stop",
+		Index: &idx1,
+	}, state)
+	require.Len(t, events, 2)
+	assert.Equal(t, "response.reasoning_text.done", events[0].Type)
+	assert.Equal(t, "response.output_item.done", events[1].Type)
+
+	_ = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:  "message_delta",
+		Usage: &AnthropicUsage{OutputTokens: 7},
+		Delta: &AnthropicDelta{StopReason: "end_turn"},
+	}, state)
+
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{Type: "message_stop"}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "response.completed", events[0].Type)
+	require.NotNil(t, events[0].Response)
+	assert.Equal(t, "completed", events[0].Response.Status)
+	assert.Equal(t, "Hello", events[0].Response.OutputText)
+	require.Len(t, events[0].Response.Output, 2)
+	assert.Equal(t, "message", events[0].Response.Output[0].Type)
+	require.Len(t, events[0].Response.Output[0].Content, 1)
+	assert.Equal(t, "Hello", events[0].Response.Output[0].Content[0].Text)
+	assert.Equal(t, "reasoning", events[0].Response.Output[1].Type)
+	assert.Equal(t, "enc_data", events[0].Response.Output[1].EncryptedContent)
+	assert.Equal(t, "rs_1", events[0].Response.Output[1].ID)
+	require.NotNil(t, events[0].Response.Usage)
+	assert.Equal(t, 11, events[0].Response.Usage.InputTokens)
+	assert.Equal(t, 7, events[0].Response.Usage.OutputTokens)
+}
+
+func TestResponsesEventToAnthropicEvents_ContentPartRefusalAndReasoningText(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:     "response.created",
+		Response: &ResponsesResponse{ID: "resp_alias", Model: "gpt-5.2"},
+	}, state)
+
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:         "response.content_part.added",
+		OutputIndex:  0,
+		ContentIndex: 0,
+		Part:         json.RawMessage(`{"type":"output_text","text":"Hello"}`),
+	}, state)
+	require.Len(t, events, 2)
+	assert.Equal(t, "content_block_start", events[0].Type)
+	assert.Equal(t, "text", events[0].ContentBlock.Type)
+	assert.Equal(t, "content_block_delta", events[1].Type)
+	assert.Equal(t, "Hello", events[1].Delta.Text)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:  "response.refusal.delta",
+		Delta: "Sorry",
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_delta", events[0].Type)
+	assert.Equal(t, "text_delta", events[0].Delta.Type)
+	assert.Equal(t, "Sorry", events[0].Delta.Text)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.added",
+		OutputIndex: 1,
+		Item:        &ResponsesOutput{Type: "reasoning"},
+	}, state)
+	require.Len(t, events, 2)
+	assert.Equal(t, "content_block_stop", events[0].Type)
+	assert.Equal(t, "content_block_start", events[1].Type)
+	assert.Equal(t, "thinking", events[1].ContentBlock.Type)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.reasoning_text.delta",
+		OutputIndex: 1,
+		Delta:       "plan",
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_delta", events[0].Type)
+	assert.Equal(t, "thinking_delta", events[0].Delta.Type)
+	assert.Equal(t, "plan", events[0].Delta.Thinking)
+}
+
 func TestAnthropicToResponses_OutputConfigHigh(t *testing.T) {
 	// output_config.effort="high" → mapped to "high" (1:1, both sides' default).
 	req := &AnthropicRequest{
@@ -1154,4 +1319,328 @@ func TestAnthropicToResponses_ToolWithNilSchema(t *testing.T) {
 	require.NoError(t, json.Unmarshal(resp.Tools[0].Parameters, &params))
 	assert.JSONEq(t, `"object"`, string(params["type"]))
 	assert.JSONEq(t, `{}`, string(params["properties"]))
+}
+
+func TestAnthropicToResponses_MCPRoundTripFields(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:             "gpt-5.2",
+		MaxTokens:         1024,
+		Container:         json.RawMessage(`{"id":"conv_req"}`),
+		ContextManagement: json.RawMessage(`{"edits":[{"type":"clear_function_results"}]}`),
+		MCPServers: []AnthropicMCPServer{{
+			Type:               "url",
+			URL:                "https://mcp.example.com",
+			Name:               "docs",
+			AuthorizationToken: "Bearer test",
+		}},
+		Tools: []AnthropicTool{{
+			Type:          "mcp_toolset",
+			MCPServerName: "docs",
+			DefaultConfig: json.RawMessage(`{"enabled":false}`),
+			Configs:       json.RawMessage(`{"lookup":{"enabled":true}}`),
+		}},
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: json.RawMessage(`"Check docs"`)},
+			{Role: "assistant", Content: json.RawMessage(`[
+				{"type":"mcp_tool_use","id":"call_mcp","name":"lookup","server_name":"docs","input":{"q":"api"}}
+			]`)},
+			{Role: "user", Content: json.RawMessage(`[
+				{"type":"mcp_tool_result","tool_use_id":"call_mcp","content":[{"type":"text","text":"found"}]}
+			]`)},
+		},
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"id":"conv_req"}`, string(resp.Conversation))
+	assert.JSONEq(t, `[{"type":"clear_function_results"}]`, string(resp.ContextManagement))
+
+	require.Len(t, resp.Tools, 1)
+	assert.Equal(t, "mcp", resp.Tools[0].Type)
+	assert.Equal(t, "docs", resp.Tools[0].ServerLabel)
+	assert.Equal(t, "https://mcp.example.com", resp.Tools[0].ServerURL)
+	assert.Equal(t, "Bearer test", resp.Tools[0].Authorization)
+	var params map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(resp.Tools[0].Parameters, &params))
+	assert.JSONEq(t, `{"enabled":false}`, string(params["default_config"]))
+	assert.JSONEq(t, `{"lookup":{"enabled":true}}`, string(params["configs"]))
+
+	var allowed []string
+	require.NoError(t, json.Unmarshal(resp.Tools[0].AllowedTools, &allowed))
+	require.Equal(t, []string{"lookup"}, allowed)
+
+	var items []ResponsesInputItem
+	require.NoError(t, json.Unmarshal(resp.Input, &items))
+	require.Len(t, items, 3)
+	assert.Equal(t, "function_call", items[1].Type)
+	assert.Equal(t, "docs", items[1].Namespace)
+	assert.JSONEq(t, `{"type":"mcp_tool_use","id":"call_mcp","name":"lookup","server_name":"docs","input":{"q":"api"}}`, stripEmptyAnthropicFields(items[1].RawItem))
+	assert.Equal(t, "function_call_output", items[2].Type)
+	assert.Equal(t, "mcp", items[2].Namespace)
+	assert.JSONEq(t, `[{"type":"text","text":"found"}]`, string(items[2].OutputRaw))
+	assert.JSONEq(t, `{"type":"mcp_tool_result","tool_use_id":"call_mcp","content":[{"type":"text","text":"found"}]}`, stripEmptyAnthropicFields(items[2].RawItem))
+}
+
+func TestResponsesToAnthropicRequest_MCPRoundTripFields(t *testing.T) {
+	req := &ResponsesRequest{
+		Model: "gpt-5.2",
+		Input: json.RawMessage(`[
+			{"role":"user","content":"Check docs"},
+			{"type":"function_call","call_id":"call_mcp","name":"lookup","arguments":"{\"q\":\"api\"}","status":"completed","namespace":"docs","item":{"type":"mcp_tool_use","id":"call_mcp","name":"lookup","server_name":"docs","input":{"q":"api"}}},
+			{"type":"function_call_output","call_id":"call_mcp","output":"found","output_raw":[{"type":"text","text":"found"}],"status":"completed","namespace":"docs","item":{"type":"mcp_tool_result","tool_use_id":"call_mcp","content":[{"type":"text","text":"found"}]}}
+		]`),
+		Conversation:      json.RawMessage(`{"id":"conv_req"}`),
+		ContextManagement: json.RawMessage(`[{"type":"clear_function_results"}]`),
+		Tools: []ResponsesTool{{
+			Type:          "mcp",
+			ServerLabel:   "docs",
+			ServerURL:     "https://mcp.example.com",
+			Authorization: "Bearer test",
+			Parameters:    json.RawMessage(`{"default_config":{"enabled":false},"configs":{"lookup":{"enabled":true}}}`),
+		}},
+	}
+
+	anth, err := ResponsesToAnthropicRequest(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"id":"conv_req"}`, string(anth.Container))
+	assert.JSONEq(t, `{"edits":[{"type":"clear_function_results"}]}`, string(anth.ContextManagement))
+	require.Len(t, anth.MCPServers, 1)
+	assert.Equal(t, "docs", anth.MCPServers[0].Name)
+	assert.Equal(t, "https://mcp.example.com", anth.MCPServers[0].URL)
+	assert.Equal(t, "Bearer test", anth.MCPServers[0].AuthorizationToken)
+	require.Len(t, anth.Tools, 1)
+	assert.Equal(t, "mcp_toolset", anth.Tools[0].Type)
+	assert.Equal(t, "docs", anth.Tools[0].MCPServerName)
+	assert.JSONEq(t, `{"enabled":false}`, string(anth.Tools[0].DefaultConfig))
+	assert.JSONEq(t, `{"lookup":{"enabled":true}}`, string(anth.Tools[0].Configs))
+
+	require.Len(t, anth.Messages, 3)
+	var assistantBlocks []AnthropicContentBlock
+	require.NoError(t, json.Unmarshal(anth.Messages[1].Content, &assistantBlocks))
+	require.Len(t, assistantBlocks, 1)
+	assert.Equal(t, "mcp_tool_use", assistantBlocks[0].Type)
+	assert.Equal(t, "docs", assistantBlocks[0].ServerName)
+
+	var userBlocks []AnthropicContentBlock
+	require.NoError(t, json.Unmarshal(anth.Messages[2].Content, &userBlocks))
+	require.Len(t, userBlocks, 1)
+	assert.Equal(t, "mcp_tool_result", userBlocks[0].Type)
+	assert.JSONEq(t, `[{"type":"text","text":"found"}]`, string(userBlocks[0].Content))
+}
+
+func TestAnthropicToResponsesResponse_MCPToolUseAndContainer(t *testing.T) {
+	resp := &AnthropicResponse{
+		ID:        "msg_mcp",
+		Type:      "message",
+		Role:      "assistant",
+		Model:     "claude-opus-4-6",
+		Container: json.RawMessage(`{"id":"conv_resp"}`),
+		Content: []AnthropicContentBlock{{
+			Type:       "mcp_tool_use",
+			ID:         "call_mcp",
+			Name:       "lookup",
+			ServerName: "docs",
+			Input:      json.RawMessage(`{"q":"api"}`),
+		}},
+		StopReason: "tool_use",
+	}
+
+	out := AnthropicToResponsesResponse(resp)
+	require.NotNil(t, out.Conversation)
+	assert.Equal(t, "conv_resp", out.Conversation.ID)
+	require.Len(t, out.Output, 1)
+	assert.Equal(t, "function_call", out.Output[0].Type)
+	assert.Equal(t, "docs", out.Output[0].Namespace)
+	assert.JSONEq(t, `{"type":"mcp_tool_use","id":"call_mcp","name":"lookup","server_name":"docs","input":{"q":"api"}}`, stripEmptyAnthropicFields(out.Output[0].RawItem))
+}
+
+func TestResponsesToAnthropic_MCPToolUseAndConversation(t *testing.T) {
+	resp := &ResponsesResponse{
+		ID:           "resp_mcp",
+		Model:        "gpt-5.2",
+		Status:       "completed",
+		Conversation: &ResponsesConversation{ID: "conv_resp"},
+		Output: []ResponsesOutput{{
+			Type:      "function_call",
+			CallID:    "call_mcp",
+			Name:      "lookup",
+			Arguments: `{"q":"api"}`,
+			Namespace: "docs",
+			RawItem:   json.RawMessage(`{"type":"mcp_tool_use","id":"call_mcp","name":"lookup","server_name":"docs","input":{"q":"api"}}`),
+		}},
+	}
+
+	anth := ResponsesToAnthropic(resp, "claude-opus-4-6")
+	assert.JSONEq(t, `{"id":"conv_resp"}`, string(anth.Container))
+	require.Len(t, anth.Content, 1)
+	assert.Equal(t, "mcp_tool_use", anth.Content[0].Type)
+	assert.Equal(t, "docs", anth.Content[0].ServerName)
+	assert.Equal(t, "tool_use", anth.StopReason)
+}
+
+func TestAnthropicEventToResponsesEvents_MCPToolUse(t *testing.T) {
+	state := NewAnthropicEventToResponsesState()
+
+	events := AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &AnthropicResponse{
+			ID:    "msg_stream_mcp",
+			Model: "claude-opus-4-6",
+		},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "response.created", events[0].Type)
+
+	idx := 0
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &AnthropicContentBlock{
+			Type:       "mcp_tool_use",
+			ID:         "call_mcp",
+			Name:       "lookup",
+			ServerName: "docs",
+		},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "response.output_item.added", events[0].Type)
+	require.NotNil(t, events[0].Item)
+	assert.Equal(t, "docs", events[0].Item.Namespace)
+	assert.JSONEq(t, `{"type":"mcp_tool_use","id":"call_mcp","name":"lookup","server_name":"docs"}`, stripEmptyAnthropicFields(events[0].Item.RawItem))
+
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &AnthropicDelta{Type: "input_json_delta", PartialJSON: `{"q":"api"}`},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "response.function_call_arguments.delta", events[0].Type)
+
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{Type: "content_block_stop", Index: &idx}, state)
+	require.Len(t, events, 2)
+	assert.Equal(t, "response.function_call_arguments.done", events[0].Type)
+	assert.Equal(t, "response.output_item.done", events[1].Type)
+	require.NotNil(t, events[1].Item)
+	assert.Equal(t, "docs", events[1].Item.Namespace)
+
+	_ = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
+		Type:  "message_delta",
+		Delta: &AnthropicDelta{StopReason: "tool_use"},
+		Usage: &AnthropicUsage{OutputTokens: 3},
+	}, state)
+	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{Type: "message_stop"}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "response.completed", events[0].Type)
+	require.NotNil(t, events[0].Response)
+	require.Len(t, events[0].Response.Output, 1)
+	assert.Equal(t, "docs", events[0].Response.Output[0].Namespace)
+}
+
+func TestResponsesEventToAnthropicEvents_MCPToolUse(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:     "response.created",
+		Response: &ResponsesResponse{ID: "resp_stream_mcp", Model: "gpt-5.2"},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "message_start", events[0].Type)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.added",
+		OutputIndex: 0,
+		Item: &ResponsesOutput{
+			Type:      "function_call",
+			CallID:    "call_mcp",
+			Name:      "lookup",
+			Namespace: "docs",
+			RawItem:   json.RawMessage(`{"type":"mcp_tool_use","id":"call_mcp","name":"lookup","server_name":"docs"}`),
+		},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_start", events[0].Type)
+	require.NotNil(t, events[0].ContentBlock)
+	assert.Equal(t, "mcp_tool_use", events[0].ContentBlock.Type)
+	assert.Equal(t, "docs", events[0].ContentBlock.ServerName)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.function_call_arguments.delta",
+		OutputIndex: 0,
+		Delta:       `{"q":"api"}`,
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_delta", events[0].Type)
+	assert.Equal(t, "input_json_delta", events[0].Delta.Type)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.done",
+		OutputIndex: 0,
+		Item:        &ResponsesOutput{Type: "function_call", Status: "completed"},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_stop", events[0].Type)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type: "response.completed",
+		Response: &ResponsesResponse{
+			Status: "completed",
+			Usage:  &ResponsesUsage{InputTokens: 7, OutputTokens: 3},
+		},
+	}, state)
+	require.Len(t, events, 2)
+	assert.Equal(t, "message_delta", events[0].Type)
+	assert.Equal(t, "tool_use", events[0].Delta.StopReason)
+	assert.Equal(t, "message_stop", events[1].Type)
+}
+
+func TestAnthropicToResponses_UnknownToolChoiceFiltered(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:      "gpt-5.2",
+		MaxTokens:  1024,
+		Messages:   []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+		ToolChoice: json.RawMessage(`{"type":"foobar","name":"x"}`),
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+	require.Len(t, resp.ToolChoice, 0)
+}
+
+func TestAnthropicToResponses_UnknownEffortFallsBackToHigh(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:        "gpt-5.2",
+		MaxTokens:    1024,
+		Messages:     []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+		OutputConfig: &AnthropicOutputConfig{Effort: "surprising"},
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Reasoning)
+	require.Equal(t, "high", resp.Reasoning.Effort)
+}
+
+func TestAnthropicToResponses_ContextManagementEditsArray(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:             "gpt-5.2",
+		MaxTokens:         1024,
+		ContextManagement: json.RawMessage(`{"edits":[{"type":"clear_function_results"}]}`),
+		Messages:          []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[{"type":"clear_function_results"}]`, string(resp.ContextManagement))
+}
+
+func TestResponsesToAnthropicRequest_ContextManagementWrapsEditsArray(t *testing.T) {
+	req := &ResponsesRequest{
+		Model:             "gpt-5.2",
+		Input:             json.RawMessage(`[{"role":"user","content":"Hello"}]`),
+		ContextManagement: json.RawMessage(`[{"type":"clear_function_results"}]`),
+	}
+
+	anth, err := ResponsesToAnthropicRequest(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"edits":[{"type":"clear_function_results"}]}`, string(anth.ContextManagement))
 }

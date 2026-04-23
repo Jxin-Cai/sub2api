@@ -90,6 +90,20 @@ func (s *cleanupRepoStub) CancelTask(ctx context.Context, taskID int64, canceled
 	return true, nil
 }
 
+func (s *cleanupRepoStub) RetryTask(ctx context.Context, taskID int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.statusByID == nil {
+		s.statusByID = map[int64]string{}
+	}
+	status := s.statusByID[taskID]
+	if status != service.UsageCleanupStatusFailed {
+		return false, nil
+	}
+	s.statusByID[taskID] = service.UsageCleanupStatusPending
+	return true, nil
+}
+
 func (s *cleanupRepoStub) MarkTaskSucceeded(ctx context.Context, taskID int64, deletedRows int64) error {
 	return nil
 }
@@ -117,6 +131,7 @@ func setupCleanupRouter(cleanupService *service.UsageCleanupService, userID int6
 	handler := NewUsageHandler(nil, nil, nil, cleanupService)
 	router.POST("/api/v1/admin/usage/cleanup-tasks", handler.CreateCleanupTask)
 	router.GET("/api/v1/admin/usage/cleanup-tasks", handler.ListCleanupTasks)
+	router.POST("/api/v1/admin/usage/cleanup-tasks/:id/retry", handler.RetryCleanupTask)
 	router.POST("/api/v1/admin/usage/cleanup-tasks/:id/cancel", handler.CancelCleanupTask)
 	return router
 }
@@ -460,4 +475,36 @@ func TestUsageHandlerCancelCleanupTaskSuccess(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestUsageHandlerRetryCleanupTaskConflict(t *testing.T) {
+	repo := &cleanupRepoStub{statusByID: map[int64]string{2: service.UsageCleanupStatusSucceeded}}
+	cfg := &config.Config{UsageCleanup: config.UsageCleanupConfig{Enabled: true}}
+	cleanupService := service.NewUsageCleanupService(repo, nil, nil, cfg)
+	router := setupCleanupRouter(cleanupService, 1)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/usage/cleanup-tasks/2/retry", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+}
+
+func TestUsageHandlerRetryCleanupTaskSuccess(t *testing.T) {
+	repo := &cleanupRepoStub{statusByID: map[int64]string{3: service.UsageCleanupStatusFailed}}
+	cfg := &config.Config{UsageCleanup: config.UsageCleanupConfig{Enabled: true}}
+	cleanupService := service.NewUsageCleanupService(repo, nil, nil, cfg)
+	router := setupCleanupRouter(cleanupService, 1)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/usage/cleanup-tasks/3/retry", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload response.Response
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	dataMap, ok := payload.Data.(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(3), dataMap["id"])
+	require.Equal(t, service.UsageCleanupStatusPending, dataMap["status"])
 }

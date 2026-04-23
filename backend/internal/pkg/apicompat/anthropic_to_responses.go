@@ -59,16 +59,31 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 		out.Metadata = req.Metadata
 	}
 
+	if req.ServiceTier != "" {
+		out.ServiceTier = req.ServiceTier
+	}
+
+	if len(req.ContextManagement) > 0 {
+		out.ContextManagement = anthropicContextManagementToResponses(req.ContextManagement)
+	}
+
+	if len(req.Container) > 0 {
+		out.Conversation = req.Container
+	}
+
 	if len(req.Tools) > 0 {
-		out.Tools = convertAnthropicToolsToResponses(req.Tools)
+		out.Tools = convertAnthropicToolsToResponses(req.Tools, req.MCPServers)
+	} else if len(req.MCPServers) > 0 {
+		out.Tools = convertAnthropicToolsToResponses(nil, req.MCPServers)
 	}
 
 	effort := "high"
 	if req.OutputConfig != nil && req.OutputConfig.Effort != "" {
 		effort = req.OutputConfig.Effort
 	}
+	normalizedEffort := mapAnthropicEffortToResponses(effort)
 	out.Reasoning = &ResponsesReasoning{
-		Effort:  mapAnthropicEffortToResponses(effort),
+		Effort:  normalizedEffort,
 		Summary: "detailed",
 	}
 
@@ -111,8 +126,7 @@ func convertAnthropicToolChoiceToResponses(raw json.RawMessage) (json.RawMessage
 			"function": map[string]string{"name": tc.Name},
 		})
 	default:
-		// Pass through unknown types as-is
-		return raw, nil
+		return nil, nil
 	}
 }
 
@@ -144,6 +158,29 @@ func convertAnthropicToResponsesInput(system json.RawMessage, msgs []AnthropicMe
 		out = append(out, items...)
 	}
 	return out, nil
+}
+
+func anthropicContextManagementToResponses(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var edits []json.RawMessage
+	if err := json.Unmarshal(raw, &edits); err == nil {
+		return raw
+	}
+	var payload struct {
+		Edits []json.RawMessage `json:"edits,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &payload); err == nil {
+		if len(payload.Edits) == 0 {
+			return nil
+		}
+		encoded, err := json.Marshal(payload.Edits)
+		if err == nil {
+			return encoded
+		}
+	}
+	return nil
 }
 
 // parseAnthropicSystemPrompt handles the Anthropic system field which can be
@@ -202,7 +239,7 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 	// Images inside tool_results are extracted separately because the
 	// Responses API function_call_output.output only accepts strings.
 	for _, b := range blocks {
-		if b.Type != "tool_result" {
+		if !isAnthropicToolResultBlockType(b.Type) {
 			continue
 		}
 		outputText, imageParts := convertToolResultOutput(b)
@@ -210,12 +247,18 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 		if b.IsError {
 			status = "incomplete"
 		}
-		out = append(out, ResponsesInputItem{
-			Type:   "function_call_output",
-			CallID: b.ToolUseID,
-			Output: outputText,
-			Status: status,
-		})
+		item := ResponsesInputItem{
+			Type:      "function_call_output",
+			CallID:    b.ToolUseID,
+			Output:    outputText,
+			OutputRaw: b.Content,
+			Status:    status,
+		}
+		if b.Type == "mcp_tool_result" {
+			item.Namespace = "mcp"
+			item.RawItem = mustMarshalAnthropicContentBlock(b)
+		}
+		out = append(out, item)
 		toolResultImageParts = append(toolResultImageParts, imageParts...)
 	}
 
@@ -277,7 +320,7 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 			if b.Text != "" {
 				textParts = append(textParts, ResponsesContentPart{Type: "output_text", Text: b.Text})
 			}
-		case "tool_use":
+		case "tool_use", "mcp_tool_use":
 			// Flush pending text before tool_use
 			if len(textParts) > 0 {
 				partsJSON, err := json.Marshal(textParts)
@@ -291,13 +334,21 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 			if len(b.Input) > 0 {
 				args = string(b.Input)
 			}
-			items = append(items, ResponsesInputItem{
+			item := ResponsesInputItem{
 				Type:      "function_call",
 				CallID:    b.ID,
 				Name:      b.Name,
 				Arguments: args,
 				Status:    "completed",
-			})
+			}
+			if b.Type == "mcp_tool_use" {
+				item.Namespace = b.ServerName
+				if item.Namespace == "" {
+					item.Namespace = "mcp"
+				}
+				item.RawItem = mustMarshalAnthropicContentBlock(b)
+			}
+			items = append(items, item)
 		case "thinking":
 			if b.Signature == "" {
 				continue
@@ -355,6 +406,18 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 	}
 
 	return items, nil
+}
+
+func isAnthropicToolResultBlockType(blockType string) bool {
+	return blockType == "tool_result" || blockType == "mcp_tool_result"
+}
+
+func mustMarshalAnthropicContentBlock(block AnthropicContentBlock) json.RawMessage {
+	payload, err := json.Marshal(block)
+	if err != nil {
+		return nil
+	}
+	return payload
 }
 
 const (
@@ -490,21 +553,55 @@ func extractAnthropicTextFromBlocks(blocks []AnthropicContentBlock) string {
 //	high   → high
 //	max    → xhigh
 func mapAnthropicEffortToResponses(effort string) string {
-	if effort == "max" {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "max":
 		return "xhigh"
+	case "low", "medium", "high":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return "high"
 	}
-	return effort // low→low, medium→medium, high→high, unknown→passthrough
 }
 
 // convertAnthropicToolsToResponses maps Anthropic tool definitions to
 // Responses API tools. Server-side tools like web_search are mapped to their
-// OpenAI equivalents; regular tools become function tools.
-func convertAnthropicToolsToResponses(tools []AnthropicTool) []ResponsesTool {
+// OpenAI equivalents; MCP toolsets are reconstructed from mcp_servers.
+func convertAnthropicToolsToResponses(tools []AnthropicTool, mcpServers []AnthropicMCPServer) []ResponsesTool {
 	var out []ResponsesTool
+	mcpServerByName := make(map[string]AnthropicMCPServer, len(mcpServers))
+	for _, server := range mcpServers {
+		if server.Name != "" {
+			mcpServerByName[server.Name] = server
+		}
+	}
+
 	for _, t := range tools {
-		// Anthropic server tools like "web_search_20250305" → OpenAI {"type":"web_search"}
 		if strings.HasPrefix(t.Type, "web_search") {
 			out = append(out, ResponsesTool{Type: "web_search"})
+			continue
+		}
+		if strings.HasPrefix(t.Type, "code_execution") {
+			out = append(out, ResponsesTool{Type: "code_interpreter", Name: t.Name, Parameters: t.InputSchema})
+			continue
+		}
+		if t.Type == "mcp_toolset" {
+			tool := ResponsesTool{
+				Type:        "mcp",
+				ServerLabel: t.MCPServerName,
+				Parameters:  buildResponsesMCPToolParameters(t),
+			}
+			if server, ok := mcpServerByName[t.MCPServerName]; ok {
+				tool.ServerURL = server.URL
+				tool.Authorization = server.AuthorizationToken
+				if tool.ServerLabel == "" {
+					tool.ServerLabel = server.Name
+				}
+			}
+			if allowedTools := extractAllowedToolsFromAnthropicMCPToolset(t); len(allowedTools) > 0 {
+				allowedJSON, _ := json.Marshal(allowedTools)
+				tool.AllowedTools = allowedJSON
+			}
+			out = append(out, tool)
 			continue
 		}
 		out = append(out, ResponsesTool{
@@ -514,7 +611,85 @@ func convertAnthropicToolsToResponses(tools []AnthropicTool) []ResponsesTool {
 			Parameters:  normalizeToolParameters(t.InputSchema),
 		})
 	}
+
+	for _, server := range mcpServers {
+		if !hasAnthropicMCPToolset(tools, server.Name) {
+			out = append(out, ResponsesTool{
+				Type:          "mcp",
+				ServerLabel:   server.Name,
+				ServerURL:     server.URL,
+				Authorization: server.AuthorizationToken,
+			})
+		}
+	}
+
 	return out
+}
+
+func hasAnthropicMCPToolset(tools []AnthropicTool, serverName string) bool {
+	for _, tool := range tools {
+		if tool.Type == "mcp_toolset" && tool.MCPServerName == serverName {
+			return true
+		}
+	}
+	return false
+}
+
+func extractAllowedToolsFromAnthropicMCPToolset(tool AnthropicTool) []string {
+	var defaultConfig struct {
+		Enabled *bool `json:"enabled,omitempty"`
+	}
+	if len(tool.DefaultConfig) > 0 {
+		_ = json.Unmarshal(tool.DefaultConfig, &defaultConfig)
+	}
+
+	var legacy struct {
+		AllowedTools []string `json:"allowed_tools,omitempty"`
+	}
+	if len(tool.DefaultConfig) > 0 {
+		_ = json.Unmarshal(tool.DefaultConfig, &legacy)
+		if len(legacy.AllowedTools) > 0 {
+			return legacy.AllowedTools
+		}
+	}
+
+	var configs map[string]struct {
+		Enabled *bool `json:"enabled,omitempty"`
+	}
+	if len(tool.Configs) == 0 || json.Unmarshal(tool.Configs, &configs) != nil {
+		return nil
+	}
+	if defaultConfig.Enabled == nil || *defaultConfig.Enabled {
+		return nil
+	}
+	allowed := make([]string, 0, len(configs))
+	for name, cfg := range configs {
+		if cfg.Enabled != nil && *cfg.Enabled {
+			allowed = append(allowed, name)
+		}
+	}
+	return allowed
+}
+
+func buildResponsesMCPToolParameters(tool AnthropicTool) json.RawMessage {
+	payload := map[string]json.RawMessage{}
+	if len(tool.DefaultConfig) > 0 {
+		payload["default_config"] = tool.DefaultConfig
+	}
+	if len(tool.Configs) > 0 {
+		payload["configs"] = tool.Configs
+	}
+	if len(tool.CacheControl) > 0 {
+		payload["cache_control"] = tool.CacheControl
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 // normalizeToolParameters ensures the tool parameter schema is valid for

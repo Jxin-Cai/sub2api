@@ -712,3 +712,42 @@ func TestCloneOpenAIWSRawMessages(t *testing.T) {
 		require.Len(t, cloned, 0)
 	})
 }
+
+func TestBuildOpenAIWSCreatePayload_StripsCompatOnlyResponsesFields(t *testing.T) {
+	t.Parallel()
+
+	svc := &OpenAIGatewayService{}
+	payload := svc.buildOpenAIWSCreatePayload(map[string]any{
+		"model": "gpt-5.2",
+		"input": []any{
+			map[string]any{
+				"type":       "function_call_output",
+				"call_id":    "call_1",
+				"output":     "ok",
+				"output_raw": []any{map[string]any{"type": "text", "text": "ok"}},
+				"namespace":  "mcp",
+				"item":       map[string]any{"type": "mcp_tool_result"},
+			},
+		},
+		"background":  true,
+		"tool_choice": map[string]any{"type": "tool", "name": "lookup"},
+	}, &Account{Type: AccountTypeOAuth})
+
+	require.Equal(t, "response.create", payload["type"])
+	_, hasBackground := payload["background"]
+	require.False(t, hasBackground)
+	_, hasToolChoice := payload["tool_choice"]
+	require.False(t, hasToolChoice)
+
+	input, ok := payload["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, input, 1)
+	item, ok := input[0].(map[string]any)
+	require.True(t, ok)
+	_, hasOutputRaw := item["output_raw"]
+	require.False(t, hasOutputRaw)
+	_, hasNamespace := item["namespace"]
+	require.False(t, hasNamespace)
+	_, hasRawItem := item["item"]
+	require.False(t, hasRawItem)
+}

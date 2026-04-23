@@ -12,20 +12,23 @@ import "encoding/json"
 
 // AnthropicRequest is the request body for POST /v1/messages.
 type AnthropicRequest struct {
-	Model        string                 `json:"model"`
-	MaxTokens    int                    `json:"max_tokens"`
-	System       json.RawMessage        `json:"system,omitempty"` // string or []AnthropicContentBlock
-	Messages     []AnthropicMessage     `json:"messages"`
-	Tools        []AnthropicTool        `json:"tools,omitempty"`
-	Stream       bool                   `json:"stream,omitempty"`
-	Temperature  *float64               `json:"temperature,omitempty"`
-	TopP         *float64               `json:"top_p,omitempty"`
-	StopSeqs     []string               `json:"stop_sequences,omitempty"`
-	Thinking     *AnthropicThinking     `json:"thinking,omitempty"`
-	ToolChoice   json.RawMessage        `json:"tool_choice,omitempty"`
-	OutputConfig *AnthropicOutputConfig `json:"output_config,omitempty"`
-	ServiceTier  string                 `json:"service_tier,omitempty"`
-	Metadata     json.RawMessage        `json:"metadata,omitempty"`
+	Model             string                 `json:"model"`
+	MaxTokens         int                    `json:"max_tokens"`
+	System            json.RawMessage        `json:"system,omitempty"` // string or []AnthropicContentBlock
+	Messages          []AnthropicMessage     `json:"messages"`
+	Tools             []AnthropicTool        `json:"tools,omitempty"`
+	MCPServers        []AnthropicMCPServer   `json:"mcp_servers,omitempty"`
+	Container         json.RawMessage        `json:"container,omitempty"`
+	ContextManagement json.RawMessage        `json:"context_management,omitempty"`
+	Stream            bool                   `json:"stream,omitempty"`
+	Temperature       *float64               `json:"temperature,omitempty"`
+	TopP              *float64               `json:"top_p,omitempty"`
+	StopSeqs          []string               `json:"stop_sequences,omitempty"`
+	Thinking          *AnthropicThinking     `json:"thinking,omitempty"`
+	ToolChoice        json.RawMessage        `json:"tool_choice,omitempty"`
+	OutputConfig      *AnthropicOutputConfig `json:"output_config,omitempty"`
+	ServiceTier       string                 `json:"service_tier,omitempty"`
+	Metadata          json.RawMessage        `json:"metadata,omitempty"`
 }
 
 // AnthropicOutputConfig controls output generation parameters.
@@ -50,21 +53,22 @@ type AnthropicContentBlock struct {
 	Type string `json:"type"`
 
 	// type=text
-	Text string `json:"text,omitempty"`
+	Text string `json:"text"`
 
 	// type=thinking
-	Thinking  string `json:"thinking,omitempty"`
+	Thinking  string `json:"thinking"`
 	Signature string `json:"signature,omitempty"`
 
 	// type=image
 	Source *AnthropicImageSource `json:"source,omitempty"`
 
-	// type=tool_use
-	ID    string          `json:"id,omitempty"`
-	Name  string          `json:"name,omitempty"`
-	Input json.RawMessage `json:"input,omitempty"`
+	// type=tool_use / server_tool_use / mcp_tool_use
+	ID         string          `json:"id,omitempty"`
+	Name       string          `json:"name,omitempty"`
+	ServerName string          `json:"server_name,omitempty"`
+	Input      json.RawMessage `json:"input,omitempty"`
 
-	// type=tool_result
+	// type=tool_result / web_search_tool_result / mcp_tool_result
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // string or []AnthropicContentBlock
 	IsError   bool            `json:"is_error,omitempty"`
@@ -79,10 +83,23 @@ type AnthropicImageSource struct {
 
 // AnthropicTool describes a tool available to the model.
 type AnthropicTool struct {
-	Type        string          `json:"type,omitempty"` // e.g. "web_search_20250305" for server tools
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"` // JSON Schema object
+	Type          string          `json:"type,omitempty"` // e.g. "web_search_20250305" / "mcp_toolset"
+	Name          string          `json:"name,omitempty"`
+	Description   string          `json:"description,omitempty"`
+	InputSchema   json.RawMessage `json:"input_schema,omitempty"`
+	MCPServerName string          `json:"mcp_server_name,omitempty"`
+	DefaultConfig json.RawMessage `json:"default_config,omitempty"`
+	Configs       json.RawMessage `json:"configs,omitempty"`
+	CacheControl  json.RawMessage `json:"cache_control,omitempty"`
+}
+
+// AnthropicMCPServer describes one entry in the mcp_servers array.
+type AnthropicMCPServer struct {
+	Type               string          `json:"type,omitempty"`
+	URL                string          `json:"url,omitempty"`
+	Name               string          `json:"name,omitempty"`
+	AuthorizationToken string          `json:"authorization_token,omitempty"`
+	ToolConfiguration  json.RawMessage `json:"tool_configuration,omitempty"`
 }
 
 // AnthropicResponse is the non-streaming response from POST /v1/messages.
@@ -95,6 +112,7 @@ type AnthropicResponse struct {
 	StopReason   string                  `json:"stop_reason"`
 	StopSequence *string                 `json:"stop_sequence,omitempty"`
 	Usage        AnthropicUsage          `json:"usage"`
+	Container    json.RawMessage         `json:"container,omitempty"`
 }
 
 // AnthropicUsage holds token counts in Anthropic format.
@@ -163,28 +181,49 @@ type AnthropicDelta struct {
 
 // ResponsesRequest is the request body for POST /v1/responses.
 type ResponsesRequest struct {
-	Model             string              `json:"model"`
-	Instructions      string              `json:"instructions,omitempty"`
-	Input             json.RawMessage     `json:"input"` // string or []ResponsesInputItem
-	MaxOutputTokens   *int                `json:"max_output_tokens,omitempty"`
-	Temperature       *float64            `json:"temperature,omitempty"`
-	TopP              *float64            `json:"top_p,omitempty"`
-	Stream            bool                `json:"stream,omitempty"`
-	Tools             []ResponsesTool     `json:"tools,omitempty"`
-	Include           []string            `json:"include,omitempty"`
-	Store             *bool               `json:"store,omitempty"`
-	Reasoning         *ResponsesReasoning `json:"reasoning,omitempty"`
-	ToolChoice        json.RawMessage     `json:"tool_choice,omitempty"`
-	ServiceTier       string              `json:"service_tier,omitempty"`
-	ParallelToolCalls *bool               `json:"parallel_tool_calls,omitempty"`
-	Metadata          json.RawMessage     `json:"metadata,omitempty"`
-	PromptCacheKey    string              `json:"prompt_cache_key,omitempty"`
+	Background           *bool               `json:"background,omitempty"`
+	ContextManagement    json.RawMessage     `json:"context_management,omitempty"`
+	Conversation         json.RawMessage     `json:"conversation,omitempty"`
+	Include              []string            `json:"include,omitempty"`
+	Input                json.RawMessage     `json:"input"` // string or []ResponsesInputItem
+	Instructions         string              `json:"instructions,omitempty"`
+	MaxOutputTokens      *int                `json:"max_output_tokens,omitempty"`
+	Metadata             json.RawMessage     `json:"metadata,omitempty"`
+	Model                string              `json:"model"`
+	ParallelToolCalls    *bool               `json:"parallel_tool_calls,omitempty"`
+	PreviousResponseID   string              `json:"previous_response_id,omitempty"`
+	Prompt               *ResponsesPrompt    `json:"prompt,omitempty"`
+	PromptCacheKey       string              `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string              `json:"prompt_cache_retention,omitempty"`
+	Reasoning            *ResponsesReasoning `json:"reasoning,omitempty"`
+	SafetyIdentifier     string              `json:"safety_identifier,omitempty"`
+	ServiceTier          string              `json:"service_tier,omitempty"`
+	Store                *bool               `json:"store,omitempty"`
+	Stream               bool                `json:"stream,omitempty"`
+	StreamOptions        json.RawMessage     `json:"stream_options,omitempty"`
+	Temperature          *float64            `json:"temperature,omitempty"`
+	Text                 json.RawMessage     `json:"text,omitempty"`
+	ToolChoice           json.RawMessage     `json:"tool_choice,omitempty"`
+	Tools                []ResponsesTool     `json:"tools,omitempty"`
+	TopLogprobs          *int                `json:"top_logprobs,omitempty"`
+	TopP                 *float64            `json:"top_p,omitempty"`
+	Truncation           string              `json:"truncation,omitempty"`
+	User                 string              `json:"user,omitempty"`
+}
+
+// ResponsesPrompt references a reusable prompt template.
+type ResponsesPrompt struct {
+	ID        string         `json:"id"`
+	Variables map[string]any `json:"variables,omitempty"`
+	Version   string         `json:"version,omitempty"`
 }
 
 // ResponsesReasoning configures reasoning effort in the Responses API.
 type ResponsesReasoning struct {
-	Effort  string `json:"effort"`            // "low" | "medium" | "high" | "xhigh"
-	Summary string `json:"summary,omitempty"` // "auto" | "concise" | "detailed"
+	Effort           string `json:"effort,omitempty"`  // "low" | "medium" | "high" | "xhigh"
+	Summary          string `json:"summary,omitempty"` // "auto" | "concise" | "detailed"
+	GenerateSummary  string `json:"generate_summary,omitempty"`
+	EncryptedContent string `json:"encrypted_content,omitempty"`
 }
 
 // ResponsesInputItem is one item in the Responses API input array.
@@ -196,86 +235,153 @@ type ResponsesInputItem struct {
 	// Role-based messages (system/user/assistant)
 	Role    string          `json:"role,omitempty"`
 	Content json.RawMessage `json:"content,omitempty"` // string or []ResponsesContentPart
+	Phase   string          `json:"phase,omitempty"`
 
-	// type=function_call
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	ID        string `json:"id,omitempty"`
-	Status    string `json:"status,omitempty"` // "completed" | "incomplete"
+	// type=function_call / function_call_output / tool-like items
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Status    string          `json:"status,omitempty"` // "in_progress" | "completed" | "incomplete"
+	Output    string          `json:"output,omitempty"`
+	OutputRaw json.RawMessage `json:"output_raw,omitempty"`
+	Namespace string          `json:"namespace,omitempty"`
+	RawItem   json.RawMessage `json:"item,omitempty"`
 
-	// type=function_call_output
-	Output string `json:"output,omitempty"`
-
-	// type=reasoning
+	// type=reasoning / compaction
 	Summary          []ResponsesSummary `json:"summary,omitempty"`
 	EncryptedContent string             `json:"encrypted_content,omitempty"`
 }
 
 // ResponsesContentPart is a typed content part in a Responses message.
 type ResponsesContentPart struct {
-	Type     string `json:"type"` // "input_text" | "output_text" | "input_image"
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url,omitempty"` // data URI for input_image
+	Type        string             `json:"type"`
+	Text        string             `json:"text,omitempty"`
+	ImageURL    string             `json:"image_url,omitempty"`
+	FileID      string             `json:"file_id,omitempty"`
+	FileURL     string             `json:"file_url,omitempty"`
+	FileData    string             `json:"file_data,omitempty"`
+	Filename    string             `json:"filename,omitempty"`
+	Detail      string             `json:"detail,omitempty"`
+	InputAudio  *ResponsesAudioRef `json:"input_audio,omitempty"`
+	Refusal     string             `json:"refusal,omitempty"`
+	Annotations []json.RawMessage  `json:"annotations,omitempty"`
+	Logprobs    json.RawMessage    `json:"logprobs,omitempty"`
+}
+
+// ResponsesAudioRef contains inline audio input metadata.
+type ResponsesAudioRef struct {
+	Data   string `json:"data,omitempty"`
+	Format string `json:"format,omitempty"`
 }
 
 // ResponsesTool describes a tool in the Responses API.
 type ResponsesTool struct {
-	Type        string          `json:"type"` // "function" | "web_search" | "local_shell" etc.
-	Name        string          `json:"name,omitempty"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
-	Strict      *bool           `json:"strict,omitempty"`
+	Type            string          `json:"type"`
+	Name            string          `json:"name,omitempty"`
+	Description     string          `json:"description,omitempty"`
+	Parameters      json.RawMessage `json:"parameters,omitempty"`
+	Strict          *bool           `json:"strict,omitempty"`
+	ServerLabel     string          `json:"server_label,omitempty"`
+	ConnectorID     string          `json:"connector_id,omitempty"`
+	ServerURL       string          `json:"server_url,omitempty"`
+	Authorization   string          `json:"authorization,omitempty"`
+	AllowedTools    json.RawMessage `json:"allowed_tools,omitempty"`
+	Headers         json.RawMessage `json:"headers,omitempty"`
+	RequireApproval string          `json:"require_approval,omitempty"`
 }
 
 // ResponsesResponse is the non-streaming response from POST /v1/responses.
 type ResponsesResponse struct {
-	ID     string            `json:"id"`
-	Object string            `json:"object"` // "response"
-	Model  string            `json:"model"`
-	Status string            `json:"status"` // "completed" | "incomplete" | "failed"
-	Output []ResponsesOutput `json:"output"`
-	Usage  *ResponsesUsage   `json:"usage,omitempty"`
-
-	// incomplete_details is present when status="incomplete"
+	ID                string                      `json:"id"`
+	Object            string                      `json:"object"` // "response"
+	CreatedAt         int64                       `json:"created_at,omitempty"`
+	Error             *ResponsesError             `json:"error,omitempty"`
 	IncompleteDetails *ResponsesIncompleteDetails `json:"incomplete_details,omitempty"`
+	Instructions      string                      `json:"instructions,omitempty"`
+	Metadata          json.RawMessage             `json:"metadata,omitempty"`
+	Model             string                      `json:"model"`
+	Output            []ResponsesOutput           `json:"output"`
+	OutputText        string                      `json:"output_text,omitempty"`
+	ParallelToolCalls *bool                       `json:"parallel_tool_calls,omitempty"`
+	Status            string                      `json:"status"` // "completed" | "incomplete" | "failed"
+	Temperature       *float64                    `json:"temperature,omitempty"`
+	Text              json.RawMessage             `json:"text,omitempty"`
+	ToolChoice        json.RawMessage             `json:"tool_choice,omitempty"`
+	Tools             []ResponsesTool             `json:"tools,omitempty"`
+	TopP              *float64                    `json:"top_p,omitempty"`
+	Truncation        string                      `json:"truncation,omitempty"`
+	Usage             *ResponsesUsage             `json:"usage,omitempty"`
+	User              string                      `json:"user,omitempty"`
+	Conversation      *ResponsesConversation      `json:"conversation,omitempty"`
+}
 
-	// Error is present when status="failed"
-	Error *ResponsesError `json:"error,omitempty"`
+// ResponsesConversation identifies a stored conversation.
+type ResponsesConversation struct {
+	ID string `json:"id,omitempty"`
 }
 
 // ResponsesError describes an error in a failed response.
 type ResponsesError struct {
-	Code    string `json:"code"`
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
 // ResponsesIncompleteDetails explains why a response is incomplete.
 type ResponsesIncompleteDetails struct {
-	Reason string `json:"reason"` // "max_output_tokens" | "content_filter"
+	Reason string `json:"reason,omitempty"` // "max_output_tokens" | "content_filter"
 }
 
 // ResponsesOutput is one output item in a Responses API response.
 type ResponsesOutput struct {
-	Type string `json:"type"` // "message" | "reasoning" | "function_call" | "web_search_call"
+	Type string `json:"type"`
+
+	// Common item identity
+	ID        string `json:"id,omitempty"`
+	Status    string `json:"status,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
 
 	// type=message
-	ID      string                 `json:"id,omitempty"`
 	Role    string                 `json:"role,omitempty"`
 	Content []ResponsesContentPart `json:"content,omitempty"`
-	Status  string                 `json:"status,omitempty"`
+	Phase   string                 `json:"phase,omitempty"`
 
-	// type=reasoning
+	// type=reasoning / compaction
 	EncryptedContent string             `json:"encrypted_content,omitempty"`
 	Summary          []ResponsesSummary `json:"summary,omitempty"`
 
-	// type=function_call
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
+	// type=function_call / tool-like items
+	CallID            string           `json:"call_id,omitempty"`
+	Name              string           `json:"name,omitempty"`
+	Arguments         string           `json:"arguments,omitempty"`
+	Namespace         string           `json:"namespace,omitempty"`
+	Action            *WebSearchAction `json:"action,omitempty"`
+	Actions           json.RawMessage  `json:"actions,omitempty"`
+	Result            string           `json:"result,omitempty"`
+	Output            json.RawMessage  `json:"output,omitempty"`
+	Logs              string           `json:"logs,omitempty"`
+	Code              string           `json:"code,omitempty"`
+	Results           json.RawMessage  `json:"results,omitempty"`
+	ServerLabel       string           `json:"server_label,omitempty"`
+	ApprovalRequestID string           `json:"approval_request_id,omitempty"`
+	Approved          *bool            `json:"approved,omitempty"`
+	Reason            string           `json:"reason,omitempty"`
+	Operation         json.RawMessage  `json:"operation,omitempty"`
+	RawItem           json.RawMessage  `json:"item,omitempty"`
+}
 
-	// type=web_search_call
-	Action *WebSearchAction `json:"action,omitempty"`
+// ResponsesOutputPart captures generic content-part events.
+type ResponsesOutputPart struct {
+	Type        string            `json:"type"`
+	Text        string            `json:"text,omitempty"`
+	Refusal     string            `json:"refusal,omitempty"`
+	Annotations []json.RawMessage `json:"annotations,omitempty"`
+	RawPart     json.RawMessage   `json:"part,omitempty"`
+}
+
+// ResponsesAnnotationAdded captures output text annotation events.
+type ResponsesAnnotationAdded struct {
+	Annotation json.RawMessage `json:"annotation,omitempty"`
 }
 
 // WebSearchAction describes the search action in a web_search_call output item.
@@ -320,31 +426,35 @@ type ResponsesOutputTokensDetails struct {
 type ResponsesStreamEvent struct {
 	Type string `json:"type"`
 
-	// response.created / response.completed / response.failed / response.incomplete
+	// response.* lifecycle events
 	Response *ResponsesResponse `json:"response,omitempty"`
 
 	// response.output_item.added / response.output_item.done
 	Item *ResponsesOutput `json:"item,omitempty"`
 
-	// response.output_text.delta / response.output_text.done
-	OutputIndex  int    `json:"output_index,omitempty"`
-	ContentIndex int    `json:"content_index,omitempty"`
-	Delta        string `json:"delta,omitempty"`
-	Text         string `json:"text,omitempty"`
-	ItemID       string `json:"item_id,omitempty"`
+	// Generic output/content addressing
+	OutputIndex     int `json:"output_index,omitempty"`
+	ContentIndex    int `json:"content_index,omitempty"`
+	SummaryIndex    int `json:"summary_index,omitempty"`
+	AnnotationIndex int `json:"annotation_index,omitempty"`
 
-	// response.function_call_arguments.delta / done
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-
-	// response.reasoning_summary_text.delta / done
-	// Reuses Text/Delta fields above, SummaryIndex identifies which summary part
-	SummaryIndex int `json:"summary_index,omitempty"`
+	// Common delta/done payloads
+	Delta       string          `json:"delta,omitempty"`
+	Text        string          `json:"text,omitempty"`
+	Refusal     string          `json:"refusal,omitempty"`
+	ItemID      string          `json:"item_id,omitempty"`
+	CallID      string          `json:"call_id,omitempty"`
+	Name        string          `json:"name,omitempty"`
+	Arguments   string          `json:"arguments,omitempty"`
+	Part        json.RawMessage `json:"part,omitempty"`
+	Annotation  json.RawMessage `json:"annotation,omitempty"`
+	Logprobs    json.RawMessage `json:"logprobs,omitempty"`
+	Obfuscation string          `json:"obfuscation,omitempty"`
 
 	// error event fields
-	Code  string `json:"code,omitempty"`
-	Param string `json:"param,omitempty"`
+	Code    string `json:"code,omitempty"`
+	Param   string `json:"param,omitempty"`
+	Message string `json:"message,omitempty"`
 
 	// Sequence number for ordering events
 	SequenceNumber int `json:"sequence_number,omitempty"`

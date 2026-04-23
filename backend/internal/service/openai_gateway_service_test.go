@@ -1506,11 +1506,11 @@ func TestOpenAIBuildUpstreamRequestCompactForcesJSONAcceptForOAuth(t *testing.T)
 	require.NotEmpty(t, req.Header.Get("Session_Id"))
 }
 
-func TestOpenAIBuildUpstreamRequestPreservesCompactPathForAPIKeyBaseURL(t *testing.T) {
+func TestOpenAIBuildUpstreamRequestOpenAIPassthrough_RetrievePreservesMethodPathAndQuery(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/responses/compact", bytes.NewReader([]byte(`{"model":"gpt-5"}`)))
+	c.Request = httptest.NewRequest(http.MethodGet, "/responses/resp_123?include=output_text&starting_after=item_1&stream=true", nil)
 
 	svc := &OpenAIGatewayService{cfg: &config.Config{
 		Security: config.SecurityConfig{
@@ -1523,9 +1523,45 @@ func TestOpenAIBuildUpstreamRequestPreservesCompactPathForAPIKeyBaseURL(t *testi
 		Credentials: map[string]any{"base_url": "https://example.com/v1"},
 	}
 
-	req, err := svc.buildUpstreamRequest(c.Request.Context(), c, account, []byte(`{"model":"gpt-5"}`), "token", false, "", false)
+	req, err := svc.buildUpstreamRequestOpenAIPassthrough(c.Request.Context(), c, account, nil, "token")
 	require.NoError(t, err)
-	require.Equal(t, "https://example.com/v1/responses/compact", req.URL.String())
+	require.Equal(t, http.MethodGet, req.Method)
+	require.Equal(t, "https://example.com/v1/responses/resp_123?include=output_text&starting_after=item_1&stream=true", req.URL.String())
+	require.Equal(t, "Bearer token", req.Header.Get("Authorization"))
+	require.Empty(t, req.Header.Get("Content-Type"))
+}
+
+func TestOpenAIBuildUpstreamRequestOpenAIPassthrough_RetrieveSetsAcceptByStreamQueryForOAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		query      string
+		wantAccept string
+	}{
+		{name: "default json", query: "", wantAccept: "application/json"},
+		{name: "stream sse", query: "?stream=true", wantAccept: "text/event-stream"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses/resp_123"+tt.query, nil)
+
+			svc := &OpenAIGatewayService{}
+			account := &Account{
+				Type:        AccountTypeOAuth,
+				Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"},
+			}
+
+			req, err := svc.buildUpstreamRequestOpenAIPassthrough(c.Request.Context(), c, account, nil, "token")
+			require.NoError(t, err)
+			require.Equal(t, http.MethodGet, req.Method)
+			require.Equal(t, tt.wantAccept, req.Header.Get("Accept"))
+			require.Equal(t, chatgptCodexURL+"/resp_123"+tt.query, req.URL.String())
+		})
+	}
 }
 
 func TestOpenAIBuildUpstreamRequestOAuthOfficialClientOriginatorCompatibility(t *testing.T) {
@@ -1926,4 +1962,47 @@ func TestHandleSSEToJSON_ResponseFailedReturnsProtocolError(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Contains(t, rec.Body.String(), "upstream rejected request")
 	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+}
+
+func TestOpenAIBuildUpstreamRequest_SanitizesContextManagementInnerFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{"model":"gpt-5.2"}`)))
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"}}
+	body := []byte(`{"model":"gpt-5.2","context_management":[{"type":"clear_function_results","keep":true},{"type":"clear_thinking_20251015"}]}`)
+
+	req, err := svc.buildUpstreamRequest(c.Request.Context(), c, account, body, "token", false, "", false)
+	require.NoError(t, err)
+
+	requestBody, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(requestBody), `"context_management":[{"type":"clear_function_results"}]`)
+	require.NotContains(t, string(requestBody), `"keep"`)
+	require.NotContains(t, string(requestBody), `clear_thinking_20251015`)
+}
+
+func TestOpenAIBuildUpstreamRequest_SanitizesResponsesCompatFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{"model":"gpt-5.2"}`)))
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{Type: AccountTypeOAuth, Platform: PlatformOpenAI, Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"}}
+	body := []byte(`{"model":"gpt-5.2","tool_choice":{"type":"tool","name":"lookup"},"input":[{"type":"function_call_output","call_id":"call_1","output":"ok","output_raw":[{"type":"text","text":"ok"}],"namespace":"mcp","item":{"type":"mcp_tool_result"}}]}`)
+
+	req, err := svc.buildUpstreamRequest(c.Request.Context(), c, account, body, "token", false, "", false)
+	require.NoError(t, err)
+
+	requestBody, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.NotContains(t, string(requestBody), `"output_raw"`)
+	require.NotContains(t, string(requestBody), `"namespace"`)
+	require.NotContains(t, string(requestBody), `"item"`)
+	require.NotContains(t, string(requestBody), `"tool_choice"`)
+	require.Contains(t, string(requestBody), `"call_id":"call_1"`)
+	require.Contains(t, string(requestBody), `"output":"ok"`)
 }

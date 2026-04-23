@@ -31,6 +31,15 @@ func TestParseOpenAIWSResponseUsageFromCompletedEvent(t *testing.T) {
 	require.Equal(t, 3, usage.CacheReadInputTokens)
 }
 
+func TestOpenAIWSEventShouldParseUsage(t *testing.T) {
+	require.True(t, openAIWSEventShouldParseUsage("response.completed"))
+	require.True(t, openAIWSEventShouldParseUsage("response.incomplete"))
+	require.True(t, openAIWSEventShouldParseUsage("response.failed"))
+	require.True(t, openAIWSEventShouldParseUsage("response.canceled"))
+	require.True(t, openAIWSEventShouldParseUsage(" response.cancelled "))
+	require.False(t, openAIWSEventShouldParseUsage("response.in_progress"))
+}
+
 func TestOpenAIWSErrorEventHelpers_ConsistentWithWrapper(t *testing.T) {
 	message := []byte(`{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"invalid input"}}`)
 	codeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)

@@ -20,6 +20,9 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 		Role:  "assistant",
 		Model: model,
 	}
+	if resp.Conversation != nil {
+		out.Container = responsesConversationToAnthropicContainer(resp.Conversation)
+	}
 
 	var blocks []AnthropicContentBlock
 
@@ -51,19 +54,34 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 			}
 		case "message":
 			for _, part := range item.Content {
-				if part.Type == "output_text" && part.Text != "" {
-					blocks = append(blocks, AnthropicContentBlock{
-						Type: "text",
-						Text: part.Text,
-					})
+				switch part.Type {
+				case "output_text":
+					if part.Text != "" {
+						blocks = append(blocks, AnthropicContentBlock{
+							Type: "text",
+							Text: part.Text,
+						})
+					}
+				case "refusal":
+					if part.Refusal != "" {
+						blocks = append(blocks, AnthropicContentBlock{
+							Type: "text",
+							Text: part.Refusal,
+						})
+					}
 				}
 			}
 		case "function_call":
+			blockType := "tool_use"
+			if isResponsesMCPNamespace(item.Namespace, item.RawItem) {
+				blockType = "mcp_tool_use"
+			}
 			blocks = append(blocks, AnthropicContentBlock{
-				Type:  "tool_use",
-				ID:    item.CallID,
-				Name:  item.Name,
-				Input: json.RawMessage(item.Arguments),
+				Type:       blockType,
+				ID:         item.CallID,
+				Name:       item.Name,
+				ServerName: item.Namespace,
+				Input:      json.RawMessage(item.Arguments),
 			})
 		case "web_search_call":
 			toolUseID := "srvtoolu_" + item.ID
@@ -100,13 +118,24 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 			cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
 		}
 		out.Usage = AnthropicUsage{
-			InputTokens:         resp.Usage.InputTokens - cachedTokens,
-			OutputTokens:        resp.Usage.OutputTokens,
+			InputTokens:          resp.Usage.InputTokens - cachedTokens,
+			OutputTokens:         resp.Usage.OutputTokens,
 			CacheReadInputTokens: cachedTokens,
 		}
 	}
 
 	return out
+}
+
+func responsesConversationToAnthropicContainer(conversation *ResponsesConversation) json.RawMessage {
+	if conversation == nil || conversation.ID == "" {
+		return nil
+	}
+	payload, err := json.Marshal(conversation)
+	if err != nil {
+		return nil
+	}
+	return payload
 }
 
 func responsesStatusToAnthropicStopReason(status string, details *ResponsesIncompleteDetails, blocks []AnthropicContentBlock) string {
@@ -117,7 +146,7 @@ func responsesStatusToAnthropicStopReason(status string, details *ResponsesIncom
 		}
 		return "end_turn"
 	case "completed":
-		if len(blocks) > 0 && blocks[len(blocks)-1].Type == "tool_use" {
+		if len(blocks) > 0 && (blocks[len(blocks)-1].Type == "tool_use" || blocks[len(blocks)-1].Type == "mcp_tool_use") {
 			return "tool_use"
 		}
 		return "end_turn"
@@ -181,19 +210,27 @@ func ResponsesEventToAnthropicEvents(
 		return resToAnthHandleCreated(evt, state)
 	case "response.output_item.added":
 		return resToAnthHandleOutputItemAdded(evt, state)
+	case "response.content_part.added":
+		return resToAnthHandleContentPartAdded(evt, state)
+	case "response.content_part.done":
+		return resToAnthHandleContentPartDone(evt, state)
 	case "response.output_text.delta":
 		return resToAnthHandleTextDelta(evt, state)
 	case "response.output_text.done":
 		return resToAnthHandleOutputTextDone(evt, state)
+	case "response.refusal.delta":
+		return resToAnthHandleRefusalDelta(evt, state)
+	case "response.refusal.done":
+		return resToAnthHandleRefusalDone(evt, state)
 	case "response.function_call_arguments.delta":
 		return resToAnthHandleFuncArgsDelta(evt, state)
 	case "response.function_call_arguments.done":
 		return resToAnthHandleFuncArgsDone(evt, state)
 	case "response.output_item.done":
 		return resToAnthHandleOutputItemDone(evt, state)
-	case "response.reasoning_summary_text.delta":
+	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 		return resToAnthHandleReasoningDelta(evt, state)
-	case "response.reasoning_summary_text.done":
+	case "response.reasoning_text.done", "response.reasoning_summary_text.done":
 		return resToAnthHandleReasoningSummaryDone(evt, state)
 	case "response.completed", "response.incomplete":
 		return resToAnthHandleCompleted(evt, state)
@@ -290,15 +327,22 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 		state.ContentBlockOpen = true
 		state.CurrentBlockType = "tool_use"
 
+		blockType := "tool_use"
+		if isResponsesMCPNamespace(evt.Item.Namespace, evt.Item.RawItem) {
+			blockType = "mcp_tool_use"
+		}
+		contentBlock := &AnthropicContentBlock{
+			Type:       blockType,
+			ID:         evt.Item.CallID,
+			Name:       evt.Item.Name,
+			ServerName: evt.Item.Namespace,
+			Input:      json.RawMessage("{}"),
+		}
+
 		events = append(events, AnthropicStreamEvent{
-			Type:  "content_block_start",
-			Index: &idx,
-			ContentBlock: &AnthropicContentBlock{
-				Type:  "tool_use",
-				ID:    evt.Item.CallID,
-				Name:  evt.Item.Name,
-				Input: json.RawMessage("{}"),
-			},
+			Type:         "content_block_start",
+			Index:        &idx,
+			ContentBlock: contentBlock,
 		})
 		return events
 
@@ -325,6 +369,106 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 		return nil
 	}
 
+	return nil
+}
+
+func resToAnthHandleContentPartAdded(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	part := decodeResponsesOutputPart(evt.Part)
+	if part == nil {
+		return nil
+	}
+
+	switch part.Type {
+	case "output_text":
+		if part.Text == "" {
+			return nil
+		}
+		clone := *evt
+		clone.Delta = part.Text
+		return resToAnthHandleTextDelta(&clone, state)
+	case "refusal":
+		text := part.Refusal
+		if text == "" {
+			text = part.Text
+		}
+		if text == "" {
+			return nil
+		}
+		clone := *evt
+		clone.Delta = text
+		clone.Refusal = text
+		return resToAnthHandleRefusalDelta(&clone, state)
+	default:
+		return nil
+	}
+}
+
+func resToAnthHandleContentPartDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	part := decodeResponsesOutputPart(evt.Part)
+	if part == nil {
+		return nil
+	}
+
+	switch part.Type {
+	case "output_text":
+		clone := *evt
+		clone.Text = part.Text
+		return resToAnthHandleOutputTextDone(&clone, state)
+	case "refusal":
+		text := part.Refusal
+		if text == "" {
+			text = part.Text
+		}
+		clone := *evt
+		clone.Refusal = text
+		clone.Text = text
+		return resToAnthHandleRefusalDone(&clone, state)
+	default:
+		return nil
+	}
+}
+
+func resToAnthHandleRefusalDelta(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	text := evt.Delta
+	if text == "" {
+		text = evt.Refusal
+	}
+	if text == "" {
+		return nil
+	}
+	clone := *evt
+	clone.Delta = text
+	return resToAnthHandleTextDelta(&clone, state)
+}
+
+func resToAnthHandleRefusalDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	text := evt.Refusal
+	if text == "" {
+		text = evt.Text
+	}
+	clone := *evt
+	clone.Text = text
+	return resToAnthHandleOutputTextDone(&clone, state)
+}
+
+func decodeResponsesOutputPart(raw json.RawMessage) *ResponsesOutputPart {
+	if len(raw) == 0 {
+		return nil
+	}
+	var part ResponsesOutputPart
+	if err := json.Unmarshal(raw, &part); err == nil && part.Type != "" {
+		return &part
+	}
+	var contentPart ResponsesContentPart
+	if err := json.Unmarshal(raw, &contentPart); err == nil && contentPart.Type != "" {
+		return &ResponsesOutputPart{
+			Type:        contentPart.Type,
+			Text:        contentPart.Text,
+			Refusal:     contentPart.Refusal,
+			Annotations: contentPart.Annotations,
+			RawPart:     raw,
+		}
+	}
 	return nil
 }
 

@@ -734,6 +734,43 @@ func TestResponsesEventToChatChunks_CompletedWithToolCalls(t *testing.T) {
 	assert.Equal(t, "tool_calls", *chunks[0].Choices[0].FinishReason)
 }
 
+func TestResponsesEventToChatChunks_ContentPartAddedAndRefusal(t *testing.T) {
+	state := NewResponsesEventToChatState()
+	state.Model = "gpt-4o"
+	state.SentRole = true
+
+	chunks := ResponsesEventToChatChunks(&ResponsesStreamEvent{
+		Type:         "response.content_part.added",
+		ContentIndex: 0,
+		Part:         json.RawMessage(`{"type":"output_text","text":"Hello"}`),
+	}, state)
+	require.Len(t, chunks, 1)
+	require.NotNil(t, chunks[0].Choices[0].Delta.Content)
+	assert.Equal(t, "Hello", *chunks[0].Choices[0].Delta.Content)
+
+	chunks = ResponsesEventToChatChunks(&ResponsesStreamEvent{
+		Type:  "response.refusal.delta",
+		Delta: "Sorry",
+	}, state)
+	require.Len(t, chunks, 1)
+	require.NotNil(t, chunks[0].Choices[0].Delta.Content)
+	assert.Equal(t, "Sorry", *chunks[0].Choices[0].Delta.Content)
+}
+
+func TestResponsesEventToChatChunks_ReasoningTextDelta(t *testing.T) {
+	state := NewResponsesEventToChatState()
+	state.Model = "gpt-4o"
+	state.SentRole = true
+
+	chunks := ResponsesEventToChatChunks(&ResponsesStreamEvent{
+		Type:  "response.reasoning_text.delta",
+		Delta: "Thinking...",
+	}, state)
+	require.Len(t, chunks, 1)
+	require.NotNil(t, chunks[0].Choices[0].Delta.ReasoningContent)
+	assert.Equal(t, "Thinking...", *chunks[0].Choices[0].Delta.ReasoningContent)
+}
+
 func TestResponsesEventToChatChunks_ReasoningDelta(t *testing.T) {
 	state := NewResponsesEventToChatState()
 	state.Model = "gpt-4o"
@@ -974,6 +1011,30 @@ func TestBufferedResponseAccumulator_ToolCalls(t *testing.T) {
 	assert.Equal(t, "call_abc", output[0].CallID)
 	assert.Equal(t, "get_weather", output[0].Name)
 	assert.Equal(t, `{"city":"NYC"}`, output[0].Arguments)
+}
+
+func TestBufferedResponseAccumulator_ContentPartsAndRefusal(t *testing.T) {
+	acc := NewBufferedResponseAccumulator()
+
+	acc.ProcessEvent(&ResponsesStreamEvent{
+		Type:         "response.content_part.added",
+		ContentIndex: 0,
+		Part:         json.RawMessage(`{"type":"output_text","text":"Hello"}`),
+	})
+	acc.ProcessEvent(&ResponsesStreamEvent{
+		Type:         "response.content_part.added",
+		ContentIndex: 1,
+		Part:         json.RawMessage(`{"type":"refusal","refusal":"Sorry"}`),
+	})
+
+	output := acc.BuildOutput()
+	require.Len(t, output, 1)
+	assert.Equal(t, "message", output[0].Type)
+	require.Len(t, output[0].Content, 2)
+	assert.Equal(t, "output_text", output[0].Content[0].Type)
+	assert.Equal(t, "Hello", output[0].Content[0].Text)
+	assert.Equal(t, "refusal", output[0].Content[1].Type)
+	assert.Equal(t, "Sorry", output[0].Content[1].Refusal)
 }
 
 func TestBufferedResponseAccumulator_Reasoning(t *testing.T) {
