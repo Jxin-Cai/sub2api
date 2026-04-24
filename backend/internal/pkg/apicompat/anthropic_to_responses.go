@@ -587,11 +587,6 @@ func parseReasoningSignature(sig string) (encryptedContent, id string) {
 	return sig[:idx], sig[idx+1:]
 }
 
-// encodeReasoningSignature builds "encrypted_content@id".
-func encodeReasoningSignature(encryptedContent, id string) string {
-	return encryptedContent + "@" + id
-}
-
 // anthropicImageToDataURI converts an AnthropicImageSource to a data URI string.
 // Returns "" if the source is nil or has no data.
 func anthropicImageToDataURI(src *AnthropicImageSource) string {
@@ -650,18 +645,6 @@ func convertToolResultOutput(b AnthropicContentBlock) (string, []ResponsesConten
 		text = "(empty)"
 	}
 	return text, imageParts
-}
-
-// extractAnthropicTextFromBlocks joins all text blocks, ignoring thinking/
-// tool_use/tool_result blocks.
-func extractAnthropicTextFromBlocks(blocks []AnthropicContentBlock) string {
-	var parts []string
-	for _, b := range blocks {
-		if b.Type == "text" && b.Text != "" {
-			parts = append(parts, b.Text)
-		}
-	}
-	return strings.Join(parts, "\n\n")
 }
 
 // mapAnthropicEffortToResponses converts Anthropic reasoning effort levels to

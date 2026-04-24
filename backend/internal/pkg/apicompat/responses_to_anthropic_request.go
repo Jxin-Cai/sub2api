@@ -254,12 +254,13 @@ func responsesContextManagementEditToAnthropic(raw json.RawMessage) json.RawMess
 	if strings.TrimSpace(stringValue(edit["type"])) != "compaction" {
 		return raw
 	}
+	trigger := map[string]any{"type": "input_tokens"}
 	converted := map[string]any{
-		"type": "compact_20260112",
-		"trigger": map[string]any{"type": "input_tokens"},
+		"type":    "compact_20260112",
+		"trigger": trigger,
 	}
 	if threshold, ok := intValue(edit["compact_threshold"]); ok {
-		converted["trigger"].(map[string]any)["value"] = threshold
+		trigger["value"] = threshold
 	}
 	return mustMarshalJSON(converted)
 }

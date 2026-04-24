@@ -626,10 +626,10 @@ func TestParsePagination(t *testing.T) {
 			wantPageSize: 20,
 		},
 		{
-			name:         "page_size超过1000_使用默认值",
+			name:         "page_size超过1000_仍有效",
 			query:        "page_size=1001",
 			wantPage:     1,
-			wantPageSize: 20,
+			wantPageSize: 1001,
 		},
 		{
 			name:         "page_size恰好1000_有效",
@@ -686,10 +686,10 @@ func TestParsePagination(t *testing.T) {
 			wantPageSize: 20,
 		},
 		{
-			name:         "limit超过1000_使用默认值",
+			name:         "limit超过1000_仍有效",
 			query:        "limit=2000",
 			wantPage:     1,
-			wantPageSize: 20,
+			wantPageSize: 2000,
 		},
 	}
 

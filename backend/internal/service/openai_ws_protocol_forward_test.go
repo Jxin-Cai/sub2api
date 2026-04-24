@@ -1651,7 +1651,7 @@ func TestOpenAIGatewayService_Forward_WSv2InvalidEncryptedContentSkipsRecoveryWi
 	require.False(t, gjson.GetBytes(requests[0], `input.0.encrypted_content`).Exists())
 }
 
-func TestOpenAIGatewayService_Forward_WSv2InvalidEncryptedContentRecoversSingleObjectInputAndKeepsSummary(t *testing.T) {
+func TestOpenAIGatewayService_Forward_WSv2InvalidEncryptedContentRecoversSingleObjectInput(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	var wsAttempts atomic.Int32
@@ -1763,9 +1763,7 @@ func TestOpenAIGatewayService_Forward_WSv2InvalidEncryptedContentRecoversSingleO
 	wsRequestMu.Unlock()
 	require.Len(t, requests, 2)
 	require.True(t, gjson.GetBytes(requests[0], `input.encrypted_content`).Exists(), "首轮单对象应保留 encrypted_content")
-	require.True(t, gjson.GetBytes(requests[1], `input.summary.0.text`).Exists(), "恢复重试应保留 reasoning summary")
-	require.False(t, gjson.GetBytes(requests[1], `input.encrypted_content`).Exists(), "恢复重试只应移除 encrypted_content")
-	require.Equal(t, "reasoning", gjson.GetBytes(requests[1], `input.type`).String())
+	require.False(t, gjson.GetBytes(requests[1], `input`).Exists(), "恢复重试应删除 stale reasoning input")
 	require.False(t, gjson.GetBytes(requests[1], `previous_response_id`).Exists(), "恢复重试应移除 previous_response_id")
 }
 
