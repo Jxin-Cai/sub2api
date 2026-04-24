@@ -39,7 +39,20 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 		switch block.Type {
 		case "thinking":
 			if block.Signature != "" {
-				// Check for compaction first
+				if envelope := decodeOpenAIReasoningSignatureEnvelope(block.Signature); envelope != nil {
+					item := ResponsesOutput{
+						Type:             envelope.Type,
+						ID:               envelope.ID,
+						EncryptedContent: envelope.EncryptedContent,
+						Summary:          envelope.Summary,
+						Status:           envelope.Status,
+					}
+					if item.Type == "reasoning" && len(item.Summary) == 0 {
+						item.Summary = summaryFromThinkingBlock(block.Thinking)
+					}
+					outputs = append(outputs, item)
+					continue
+				}
 				if compaction := decodeCompactionSignature(block.Signature); compaction != nil {
 					outputs = append(outputs, ResponsesOutput{
 						Type:             "compaction",
@@ -48,24 +61,14 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 					})
 					continue
 				}
-				// Reasoning with signature
 				enc, id := parseReasoningSignature(block.Signature)
 				if id != "" && len(id) <= maxReasoningIDLength {
-					thinking := block.Thinking
-					if thinking == thinkingPlaceholder {
-						thinking = ""
-					}
-					item := ResponsesOutput{
+					outputs = append(outputs, ResponsesOutput{
 						Type:             "reasoning",
 						ID:               id,
 						EncryptedContent: enc,
-					}
-					if thinking != "" {
-						item.Summary = []ResponsesSummary{{Type: "summary_text", Text: thinking}}
-					} else {
-						item.Summary = []ResponsesSummary{{Type: "summary_text", Text: ""}}
-					}
-					outputs = append(outputs, item)
+						Summary:          summaryFromThinkingBlock(block.Thinking),
+					})
 					continue
 				}
 			}
@@ -572,7 +575,17 @@ func closeCurrentResponsesItem(state *AnthropicEventToResponsesState) []Response
 
 	if item.Type == "reasoning" && state.AccumulatedSignature != "" {
 		sig := state.AccumulatedSignature
-		if compaction := decodeCompactionSignature(sig); compaction != nil {
+		if envelope := decodeOpenAIReasoningSignatureEnvelope(sig); envelope != nil {
+			item.Type = envelope.Type
+			item.ID = envelope.ID
+			item.EncryptedContent = envelope.EncryptedContent
+			if len(envelope.Summary) > 0 {
+				item.Summary = envelope.Summary
+			}
+			if envelope.Status != "" {
+				item.Status = envelope.Status
+			}
+		} else if compaction := decodeCompactionSignature(sig); compaction != nil {
 			item.Type = "compaction"
 			item.ID = compaction.id
 			item.EncryptedContent = compaction.encryptedContent

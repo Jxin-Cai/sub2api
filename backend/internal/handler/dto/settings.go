@@ -22,6 +22,13 @@ type CustomEndpoint struct {
 	Description string `json:"description"`
 }
 
+// OpenAIModelPriorityRule represents a model prefix based account preference rule.
+type OpenAIModelPriorityRule struct {
+	Prefix              string  `json:"prefix"`
+	PreferredAccountIDs []int64 `json:"preferred_account_ids"`
+	Enabled             bool    `json:"enabled"`
+}
+
 // SystemSettings represents the admin settings API response payload.
 type SystemSettings struct {
 	RegistrationEnabled              bool     `json:"registration_enabled"`
@@ -152,7 +159,8 @@ type SystemSettings struct {
 	PaymentVisibleMethodWxpayEnabled  bool   `json:"payment_visible_method_wxpay_enabled"`
 
 	// OpenAI account scheduling
-	OpenAIAdvancedSchedulerEnabled bool `json:"openai_advanced_scheduler_enabled"`
+	OpenAIAdvancedSchedulerEnabled bool                      `json:"openai_advanced_scheduler_enabled"`
+	OpenAIModelPriorityRules       []OpenAIModelPriorityRule `json:"openai_model_priority_rules"`
 
 	// Payment configuration
 	PaymentEnabled                   bool     `json:"payment_enabled"`

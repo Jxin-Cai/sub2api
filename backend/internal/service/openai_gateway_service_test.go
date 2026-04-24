@@ -190,6 +190,20 @@ func TestOpenAIGatewayService_GenerateSessionHash_Priority(t *testing.T) {
 	}
 }
 
+func TestOpenAIGatewayService_GenerateSessionHash_PrefersReasoningSeed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	body := []byte(`{"model":"gpt-5.5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"kept","signature":"oai2#payload"}]},{"role":"user","content":"continue"}]}`)
+	seed := deriveOpenAIReasoningSessionSeed(body)
+	require.NotEmpty(t, seed)
+
+	got := (&OpenAIGatewayService{}).GenerateSessionHash(c, body)
+	require.Equal(t, DeriveSessionHashFromSeed(seed), got)
+}
+
 func TestOpenAIGatewayService_GenerateSessionHash_UsesXXHash64(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
@@ -1445,6 +1459,157 @@ func TestOpenAIUpdateCodexUsageSnapshotFromHeaders(t *testing.T) {
 	}
 }
 
+func TestTrimOpenAIEncryptedReasoningItems_RemovesEncryptedReasoningAndCompaction(t *testing.T) {
+	reqBody := map[string]any{
+		"input": []any{
+			map[string]any{"type": "message", "role": "user"},
+			map[string]any{"type": "reasoning", "id": "rs_stale", "summary": "removed", "encrypted_content": "enc_reasoning"},
+			map[string]any{"type": "compaction", "encrypted_content": "enc@compact", "compact_threshold": 42},
+		},
+	}
+
+	require.True(t, trimOpenAIEncryptedReasoningItems(reqBody))
+
+	items, ok := reqBody["input"].([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+
+	message, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "message", message["type"])
+}
+
+func TestTrimOpenAIEncryptedReasoningItems_NoChangeWithoutEncryptedContent(t *testing.T) {
+	reqBody := map[string]any{
+		"input": []any{
+			map[string]any{"type": "reasoning", "summary": "kept"},
+			map[string]any{"type": "compaction", "compact_threshold": 42},
+		},
+	}
+
+	require.False(t, trimOpenAIEncryptedReasoningItems(reqBody))
+}
+
+func TestOpenAIGatewayService_ForwardAsAnthropicRetriesStaleReasoningItemOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamBase := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer upstreamBase.Close()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	upstream := &httpUpstreamSequenceRecorder{
+		responses: []*http.Response{
+			{
+				StatusCode: http.StatusNotFound,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"error":{"message":"Item with id 'rs_stale' not found. Items are not persisted when store is set to false. Try again with store set to true, or remove this item from your input.","type":"invalid_request_error"},"type":"error"}`,
+				)),
+			},
+			{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type": []string{"text/event-stream"},
+					"x-request-id": []string{"req_messages_stale_retry_ok"},
+				},
+				Body: io.NopCloser(strings.NewReader(
+					"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_messages_stale_retry_ok\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n",
+				)),
+			},
+		},
+	}
+
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+	account := &Account{
+		ID:          439,
+		Name:        "openai-apikey-messages",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": upstreamBase.URL,
+		},
+	}
+	body := []byte(`{"model":"gpt-5.5","max_tokens":1024,"stream":false,"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"thinking","thinking":"keep reasoning","signature":"enc@reasoning@rs_stale"}]},{"role":"user","content":"continue"}]}`)
+
+	_, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
+	require.NoError(t, err)
+	require.Equal(t, "resp_messages_stale_retry_ok", gjson.Get(rec.Body.String(), "id").String())
+	require.Equal(t, 2, upstream.callCount)
+	require.Len(t, upstream.bodies, 2)
+	require.Equal(t, "reasoning", gjson.GetBytes(upstream.bodies[0], "input.1.type").String())
+	require.Equal(t, "user", gjson.GetBytes(upstream.bodies[1], "input.1.role").String())
+}
+
+func TestOpenAIGatewayService_ForwardAsAnthropicRetriesInvalidEncryptedContentOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamBase := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer upstreamBase.Close()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	upstream := &httpUpstreamSequenceRecorder{
+		responses: []*http.Response{
+			{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"error":{"message":"The encrypted content @...@ could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error"},"type":"error"}`,
+				)),
+			},
+			{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type": []string{"text/event-stream"},
+					"x-request-id": []string{"req_messages_retry_ok"},
+				},
+				Body: io.NopCloser(strings.NewReader(
+					"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_messages_retry_ok\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n",
+				)),
+			},
+		},
+	}
+
+	cfg := &config.Config{}
+	cfg.Security.URLAllowlist.Enabled = false
+	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
+	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+	account := &Account{
+		ID:          439,
+		Name:        "openai-apikey-messages",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": upstreamBase.URL,
+		},
+	}
+	body := []byte(`{"model":"gpt-5.5","max_tokens":1024,"stream":false,"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"thinking","thinking":"keep reasoning","signature":"enc@reasoning@rs_123"},{"type":"thinking","thinking":"compact","signature":"cm1#enc@compact@cmp_123"}]},{"role":"user","content":"continue"}]}`)
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "resp_messages_retry_ok", gjson.Get(rec.Body.String(), "id").String())
+	require.Equal(t, 2, upstream.callCount)
+	require.Len(t, upstream.bodies, 2)
+	require.Equal(t, "reasoning", gjson.GetBytes(upstream.bodies[0], "input.1.type").String())
+	require.True(t, gjson.GetBytes(upstream.bodies[0], "input.1.encrypted_content").Exists())
+	require.Equal(t, "user", gjson.GetBytes(upstream.bodies[1], "input.1.role").String())
+}
+
 func TestOpenAIResponsesRequestPathSuffix(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
@@ -2031,7 +2196,6 @@ func TestOpenAIBuildUpstreamRequest_PreservesCompactionContextManagement(t *test
 	require.NotContains(t, string(requestBody), `ignored`)
 	require.NotContains(t, string(requestBody), `clear_thinking_20251015`)
 }
-
 
 func TestOpenAIBuildUpstreamRequest_PreservesNoneReasoningEffort(t *testing.T) {
 	gin.SetMode(gin.TestMode)

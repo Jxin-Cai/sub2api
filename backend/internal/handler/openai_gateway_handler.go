@@ -510,7 +510,7 @@ func (h *OpenAIGatewayHandler) handleResponsesRetrieve(
 
 	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription); err != nil {
 		reqLog.Info("openai.billing_eligibility_check_failed", zap.Error(err))
-		status, code, message := billingErrorDetails(err)
+		status, code, message, _ := billingErrorDetails(err)
 		h.handleStreamingAwareError(c, status, code, message, streamStarted)
 		return
 	}

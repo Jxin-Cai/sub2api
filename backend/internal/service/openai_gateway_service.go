@@ -1141,6 +1141,9 @@ func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) 
 		sessionID = strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
 	}
 	if sessionID == "" && len(body) > 0 {
+		sessionID = deriveOpenAIReasoningSessionSeed(body)
+	}
+	if sessionID == "" && len(body) > 0 {
 		sessionID = deriveOpenAIContentSessionSeed(body)
 	}
 	if sessionID == "" {
@@ -1232,9 +1235,14 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 		return nil, fmt.Errorf("query accounts failed: %w", err)
 	}
 
-	// 3. 按优先级 + LRU 选择最佳账号
-	// Select by priority + LRU
-	selected := s.selectBestAccount(ctx, groupID, accounts, requestedModel, excludedIDs)
+	// 3. 优先尝试模型优先规则
+	// Prefer model-priority accounts before regular selection
+	selected := s.selectPreferredAccountByModelPriority(ctx, groupID, accounts, requestedModel, excludedIDs)
+	if selected == nil {
+		// 4. 按优先级 + LRU 选择最佳账号
+		// Select by priority + LRU
+		selected = s.selectBestAccount(ctx, groupID, accounts, requestedModel, excludedIDs)
+	}
 
 	if selected == nil {
 		if requestedModel != "" {
@@ -1355,6 +1363,83 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 	}
 
 	return selected
+}
+
+func (s *OpenAIGatewayService) selectPreferredAccountByModelPriority(ctx context.Context, groupID *int64, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}) *Account {
+	rule := matchOpenAIModelPriorityRule(requestedModel, s.getOpenAIModelPriorityRules(ctx))
+	if rule == nil {
+		return nil
+	}
+	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
+	accountMap := make(map[int64]*Account, len(accounts))
+	for i := range accounts {
+		accountMap[accounts[i].ID] = &accounts[i]
+	}
+	for _, accountID := range rule.PreferredAccountIDs {
+		if _, excluded := excludedIDs[accountID]; excluded {
+			continue
+		}
+		account := accountMap[accountID]
+		if account == nil {
+			continue
+		}
+		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, account, requestedModel)
+		if fresh == nil {
+			continue
+		}
+		fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, requestedModel)
+		if fresh == nil {
+			continue
+		}
+		if needsUpstreamCheck && groupID != nil && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel) {
+			continue
+		}
+		return fresh
+	}
+	return nil
+}
+
+func (s *OpenAIGatewayService) trySelectPreferredAccountWithLoadAwareness(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, accounts []Account) (*AccountSelectionResult, error) {
+	rule := matchOpenAIModelPriorityRule(requestedModel, s.getOpenAIModelPriorityRules(ctx))
+	if rule == nil {
+		return nil, nil
+	}
+	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
+	accountMap := make(map[int64]*Account, len(accounts))
+	for i := range accounts {
+		accountMap[accounts[i].ID] = &accounts[i]
+	}
+	for _, accountID := range rule.PreferredAccountIDs {
+		if _, excluded := excludedIDs[accountID]; excluded {
+			continue
+		}
+		account := accountMap[accountID]
+		if account == nil {
+			continue
+		}
+		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, account, requestedModel)
+		if fresh == nil {
+			continue
+		}
+		fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, requestedModel)
+		if fresh == nil {
+			continue
+		}
+		if needsUpstreamCheck && groupID != nil && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel) {
+			continue
+		}
+		result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil && result.Acquired {
+			if sessionHash != "" {
+				_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
+			}
+			return s.newSelectionResult(ctx, fresh, true, result.ReleaseFunc, nil)
+		}
+	}
+	return nil, nil
 }
 
 // isBetterAccount 判断 candidate 是否比 current 更优。
@@ -1490,7 +1575,14 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 		}
 	}
 
-	// ============ Layer 2: Load-aware selection ============
+	// ============ Layer 2: Model-priority selection ============
+	if result, err := s.trySelectPreferredAccountWithLoadAwareness(ctx, groupID, sessionHash, requestedModel, excludedIDs, accounts); err != nil {
+		return nil, err
+	} else if result != nil {
+		return result, nil
+	}
+
+	// ============ Layer 3: Load-aware selection ============
 	candidates := make([]*Account, 0, len(accounts))
 	for i := range accounts {
 		acc := &accounts[i]
@@ -1600,7 +1692,7 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 		}
 	}
 
-	// ============ Layer 3: Fallback wait ============
+	// ============ Layer 4: Fallback wait ============
 	sortAccountsByPriorityAndLastUsed(candidates, false)
 	for _, acc := range candidates {
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, requestedModel)
@@ -2404,7 +2496,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamCode := extractUpstreamErrorCode(respBody)
-			if !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && upstreamCode == "invalid_encrypted_content" {
+			if !httpInvalidEncryptedContentRetryTried && (isOpenAIInvalidEncryptedContentResponse(resp.StatusCode, upstreamCode, upstreamMsg) || isOpenAIStaleReasoningItemResponse(resp.StatusCode, upstreamMsg)) {
 				if trimOpenAIEncryptedReasoningItems(reqBody) {
 					body, err = json.Marshal(reqBody)
 					if err != nil {
@@ -2412,10 +2504,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					}
 					setOpsUpstreamRequestBody(c, body)
 					httpInvalidEncryptedContentRetryTried = true
-					logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying non-WSv2 request once after invalid_encrypted_content (account: %s)", account.Name)
+					logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying non-WSv2 request once after stale encrypted reasoning rejection (account: %s)", account.Name)
 					continue
 				}
-				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Skip non-WSv2 invalid_encrypted_content retry because encrypted reasoning items are missing (account: %s)", account.Name)
+				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Skip non-WSv2 stale encrypted reasoning retry because encrypted reasoning items are missing (account: %s)", account.Name)
 			}
 			if s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody) {
 				upstreamDetail := ""
@@ -4397,6 +4489,29 @@ func buildOpenAIResponsesURL(base string) string {
 	return normalized + "/v1/responses"
 }
 
+func isOpenAIInvalidEncryptedContentResponse(statusCode int, upstreamCode string, upstreamMsg string) bool {
+	if statusCode != http.StatusBadRequest {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(upstreamCode))
+	if code == "invalid_encrypted_content" {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(upstreamMsg))
+	return strings.Contains(msg, "invalid_encrypted_content") ||
+		(strings.Contains(msg, "encrypted content") && strings.Contains(msg, "could not be verified"))
+}
+
+func isOpenAIStaleReasoningItemResponse(statusCode int, upstreamMsg string) bool {
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusNotFound {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(upstreamMsg))
+	return strings.Contains(msg, "item with id") &&
+		strings.Contains(msg, "not found") &&
+		strings.Contains(msg, "items are not persisted")
+}
+
 func trimOpenAIEncryptedReasoningItems(reqBody map[string]any) bool {
 	if len(reqBody) == 0 {
 		return false
@@ -4484,20 +4599,15 @@ func sanitizeEncryptedReasoningInputItem(item any) (next any, changed bool, keep
 	}
 
 	itemType, _ := inputItem["type"].(string)
-	if strings.TrimSpace(itemType) != "reasoning" {
-		return item, false, true
-	}
-
-	_, hasEncryptedContent := inputItem["encrypted_content"]
-	if !hasEncryptedContent {
-		return item, false, true
-	}
-
-	delete(inputItem, "encrypted_content")
-	if len(inputItem) == 1 {
+	switch strings.TrimSpace(itemType) {
+	case "reasoning", "compaction":
+		if _, hasEncryptedContent := inputItem["encrypted_content"]; !hasEncryptedContent {
+			return item, false, true
+		}
 		return nil, true, false
+	default:
+		return item, false, true
 	}
-	return inputItem, true, true
 }
 
 func IsOpenAIResponsesCompactPathForTest(c *gin.Context) bool {

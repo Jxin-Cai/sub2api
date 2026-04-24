@@ -149,60 +149,80 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, fmt.Errorf("get access token: %w", err)
 	}
 
-	// 6. Build upstream request
-	upstreamReq, err := s.buildUpstreamRequest(ctx, c, account, responsesBody, token, isStream, promptCacheKey, false)
-	if err != nil {
-		return nil, fmt.Errorf("build upstream request: %w", err)
-	}
-
-	// Override session_id with a deterministic UUID derived from the isolated
-	// session key, ensuring different API keys produce different upstream sessions.
-	if promptCacheKey != "" {
-		apiKeyID := getAPIKeyIDFromContext(c)
-		upstreamReq.Header.Set("session_id", generateSessionUUID(isolateOpenAISessionID(apiKeyID, promptCacheKey)))
-	}
-
-	// 7. Send request
+	// 6. Send request, retrying once if upstream rejects stale encrypted content.
 	proxyURL := ""
 	if account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
-	if err != nil {
-		safeErr := sanitizeUpstreamErrorMessage(err.Error())
-		logger.L().Warn("openai messages: upstream request failed",
-			zap.Int64("account_id", account.ID),
-			zap.String("upstream_model", upstreamModel),
-			zap.String("error", safeErr),
-		)
-		setOpsUpstreamError(c, 0, safeErr, "")
-		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-			Platform:           account.Platform,
-			AccountID:          account.ID,
-			AccountName:        account.Name,
-			UpstreamStatusCode: 0,
-			Kind:               "request_error",
-			Message:            safeErr,
-		})
-		writeAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream request failed")
-		return nil, fmt.Errorf("upstream request failed: %s", safeErr)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	httpInvalidEncryptedContentRetryTried := false
+	var resp *http.Response
+	for {
+		upstreamReq, err := s.buildUpstreamRequest(ctx, c, account, responsesBody, token, isStream, promptCacheKey, false)
+		if err != nil {
+			return nil, fmt.Errorf("build upstream request: %w", err)
+		}
 
-	// 8. Handle error response with failover
-	if resp.StatusCode >= 400 {
+		// Override session_id with a deterministic UUID derived from the isolated
+		// session key, ensuring different API keys produce different upstream sessions.
+		if promptCacheKey != "" {
+			apiKeyID := getAPIKeyIDFromContext(c)
+			upstreamReq.Header.Set("session_id", generateSessionUUID(isolateOpenAISessionID(apiKeyID, promptCacheKey)))
+		}
+
+		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		if err != nil {
+			safeErr := sanitizeUpstreamErrorMessage(err.Error())
+			logger.L().Warn("openai messages: upstream request failed",
+				zap.Int64("account_id", account.ID),
+				zap.String("upstream_model", upstreamModel),
+				zap.String("error", safeErr),
+			)
+			setOpsUpstreamError(c, 0, safeErr, "")
+			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+				Platform:           account.Platform,
+				AccountID:          account.ID,
+				AccountName:        account.Name,
+				UpstreamStatusCode: 0,
+				Kind:               "request_error",
+				Message:            safeErr,
+			})
+			writeAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream request failed")
+			return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+		}
+
+		if resp.StatusCode < 400 {
+			break
+		}
+
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
 		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+		upstreamCode := extractUpstreamErrorCode(respBody)
 		logger.L().Warn("openai messages: upstream error response",
 			zap.Int64("account_id", account.ID),
 			zap.String("upstream_model", upstreamModel),
 			zap.Int("status_code", resp.StatusCode),
 			zap.String("message", upstreamMsg),
 		)
+
+		if !httpInvalidEncryptedContentRetryTried && (isOpenAIInvalidEncryptedContentResponse(resp.StatusCode, upstreamCode, upstreamMsg) || isOpenAIStaleReasoningItemResponse(resp.StatusCode, upstreamMsg)) {
+			var reqBody map[string]any
+			if err := json.Unmarshal(responsesBody, &reqBody); err == nil && trimOpenAIEncryptedReasoningItems(reqBody) {
+				updated, err := json.Marshal(reqBody)
+				if err != nil {
+					return nil, fmt.Errorf("serialize messages invalid_encrypted_content retry body: %w", err)
+				}
+				responsesBody = updated
+				httpInvalidEncryptedContentRetryTried = true
+				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying messages request once after stale encrypted reasoning rejection (account: %s)", account.Name)
+				continue
+			}
+			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Skip messages stale encrypted reasoning retry because encrypted reasoning items are missing (account: %s)", account.Name)
+		}
+
 		if s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody) {
 			upstreamDetail := ""
 			if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
@@ -231,9 +251,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 				RetryableOnSameAccount: account.IsPoolMode() && (isPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody)),
 			}
 		}
-		// Non-failover error: return Anthropic-formatted error to client
 		return s.handleAnthropicErrorResponse(resp, c, account)
 	}
+	defer func() { _ = resp.Body.Close() }()
 
 	// 9. Handle normal response
 	// Upstream is always streaming; choose response format based on client preference.

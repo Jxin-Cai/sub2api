@@ -20,6 +20,7 @@ import (
 const (
 	openAIAccountScheduleLayerPreviousResponse = "previous_response_id"
 	openAIAccountScheduleLayerSessionSticky    = "session_hash"
+	openAIAccountScheduleLayerModelPriority    = "model_priority"
 	openAIAccountScheduleLayerLoadBalance      = "load_balance"
 	openAIAdvancedSchedulerSettingKey          = "openai_advanced_scheduler_enabled"
 )
@@ -34,8 +35,15 @@ type cachedOpenAIAdvancedSchedulerSetting struct {
 	expiresAt int64
 }
 
+type cachedOpenAIModelPriorityRulesSetting struct {
+	rules     []OpenAIModelPriorityRule
+	expiresAt int64
+}
+
 var openAIAdvancedSchedulerSettingCache atomic.Value // *cachedOpenAIAdvancedSchedulerSetting
 var openAIAdvancedSchedulerSettingSF singleflight.Group
+var openAIModelPriorityRulesSettingCache atomic.Value // *cachedOpenAIModelPriorityRulesSetting
+var openAIModelPriorityRulesSettingSF singleflight.Group
 
 type OpenAIAccountScheduleRequest struct {
 	GroupID                 *int64
@@ -291,6 +299,17 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		return selection, decision, nil
 	}
 
+	selection, err = s.selectByModelPriority(ctx, req)
+	if err != nil {
+		return nil, decision, err
+	}
+	if selection != nil && selection.Account != nil {
+		decision.Layer = openAIAccountScheduleLayerModelPriority
+		decision.SelectedAccountID = selection.Account.ID
+		decision.SelectedAccountType = selection.Account.Type
+		return selection, decision, nil
+	}
+
 	selection, candidateCount, topK, loadSkew, err := s.selectByLoadBalance(ctx, req)
 	decision.Layer = openAIAccountScheduleLayerLoadBalance
 	decision.CandidateCount = candidateCount
@@ -376,6 +395,62 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 				MaxWaiting:     cfg.StickySessionMaxWaiting,
 			},
 		}, nil
+	}
+	return nil, nil
+}
+
+func (s *defaultOpenAIAccountScheduler) selectByModelPriority(
+	ctx context.Context,
+	req OpenAIAccountScheduleRequest,
+) (*AccountSelectionResult, error) {
+	rule := matchOpenAIModelPriorityRule(req.RequestedModel, s.service.getOpenAIModelPriorityRules(ctx))
+	if rule == nil {
+		return nil, nil
+	}
+	needsUpstreamCheck := s.service.needsUpstreamChannelRestrictionCheck(ctx, req.GroupID)
+	for _, accountID := range rule.PreferredAccountIDs {
+		if req.ExcludedIDs != nil {
+			if _, excluded := req.ExcludedIDs[accountID]; excluded {
+				continue
+			}
+		}
+		account, err := s.service.getSchedulableAccount(ctx, accountID)
+		if err != nil || account == nil {
+			continue
+		}
+		if !account.IsSchedulable() || !account.IsOpenAI() {
+			continue
+		}
+		if !s.isAccountRequestCompatible(account, req) || !s.isAccountTransportCompatible(account, req.RequiredTransport) {
+			continue
+		}
+		if needsUpstreamCheck && s.service.isUpstreamModelRestrictedByChannel(ctx, *req.GroupID, account, req.RequestedModel) {
+			continue
+		}
+		account = s.service.recheckSelectedOpenAIAccountFromDB(ctx, account, req.RequestedModel)
+		if account == nil {
+			continue
+		}
+		if !s.isAccountRequestCompatible(account, req) || !s.isAccountTransportCompatible(account, req.RequiredTransport) {
+			continue
+		}
+		if needsUpstreamCheck && s.service.isUpstreamModelRestrictedByChannel(ctx, *req.GroupID, account, req.RequestedModel) {
+			continue
+		}
+		result, acquireErr := s.service.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
+		if acquireErr != nil {
+			return nil, acquireErr
+		}
+		if result != nil && result.Acquired {
+			if req.SessionHash != "" {
+				_ = s.service.BindStickySession(ctx, req.GroupID, req.SessionHash, account.ID)
+			}
+			return &AccountSelectionResult{
+				Account:     account,
+				Acquired:    true,
+				ReleaseFunc: result.ReleaseFunc,
+			}, nil
+		}
 	}
 	return nil, nil
 }
@@ -874,6 +949,72 @@ func (s *OpenAIGatewayService) isOpenAIAdvancedSchedulerEnabled(ctx context.Cont
 	return enabled
 }
 
+func matchOpenAIModelPriorityRule(requestedModel string, rules []OpenAIModelPriorityRule) *OpenAIModelPriorityRule {
+	requestedModel = strings.ToLower(strings.TrimSpace(requestedModel))
+	if requestedModel == "" || len(rules) == 0 {
+		return nil
+	}
+	var matched *OpenAIModelPriorityRule
+	for i := range rules {
+		rule := &rules[i]
+		if !rule.Enabled {
+			continue
+		}
+		prefix := strings.ToLower(strings.TrimSpace(rule.Prefix))
+		if prefix == "" || !strings.HasPrefix(requestedModel, prefix) {
+			continue
+		}
+		if matched == nil || len(prefix) > len(matched.Prefix) {
+			matched = rule
+		}
+	}
+	if matched == nil {
+		return nil
+	}
+	cloned := OpenAIModelPriorityRule{
+		Prefix:              matched.Prefix,
+		PreferredAccountIDs: append([]int64(nil), matched.PreferredAccountIDs...),
+		Enabled:             matched.Enabled,
+	}
+	return &cloned
+}
+
+func (s *OpenAIGatewayService) getOpenAIModelPriorityRules(ctx context.Context) []OpenAIModelPriorityRule {
+	if cached, ok := openAIModelPriorityRulesSettingCache.Load().(*cachedOpenAIModelPriorityRulesSetting); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cloneOpenAIModelPriorityRules(cached.rules)
+		}
+	}
+
+	result, _, _ := openAIModelPriorityRulesSettingSF.Do(SettingKeyOpenAIModelPriorityRules, func() (any, error) {
+		if cached, ok := openAIModelPriorityRulesSettingCache.Load().(*cachedOpenAIModelPriorityRulesSetting); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cloneOpenAIModelPriorityRules(cached.rules), nil
+			}
+		}
+
+		rules := []OpenAIModelPriorityRule{}
+		if repo := s.openAIAdvancedSchedulerSettingRepo(); repo != nil {
+			dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAIAdvancedSchedulerSettingDBTimeout)
+			defer cancel()
+
+			value, err := repo.GetValue(dbCtx, SettingKeyOpenAIModelPriorityRules)
+			if err == nil {
+				rules = ParseOpenAIModelPriorityRules(value)
+			}
+		}
+
+		openAIModelPriorityRulesSettingCache.Store(&cachedOpenAIModelPriorityRulesSetting{
+			rules:     cloneOpenAIModelPriorityRules(rules),
+			expiresAt: time.Now().Add(openAIAdvancedSchedulerSettingCacheTTL).UnixNano(),
+		})
+		return cloneOpenAIModelPriorityRules(rules), nil
+	})
+
+	rules, _ := result.([]OpenAIModelPriorityRule)
+	return cloneOpenAIModelPriorityRules(rules)
+}
+
 func (s *OpenAIGatewayService) getOpenAIAccountScheduler(ctx context.Context) OpenAIAccountScheduler {
 	if s == nil {
 		return nil
@@ -895,6 +1036,8 @@ func (s *OpenAIGatewayService) getOpenAIAccountScheduler(ctx context.Context) Op
 func resetOpenAIAdvancedSchedulerSettingCacheForTest() {
 	openAIAdvancedSchedulerSettingCache = atomic.Value{}
 	openAIAdvancedSchedulerSettingSF = singleflight.Group{}
+	openAIModelPriorityRulesSettingCache = atomic.Value{}
+	openAIModelPriorityRulesSettingSF = singleflight.Group{}
 }
 
 func (s *OpenAIGatewayService) SelectAccountWithScheduler(

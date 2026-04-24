@@ -216,3 +216,37 @@ func TestDeriveOpenAIContentSessionSeed_ResponsesAPI_TypedMessageItem(t *testing
 	require.Contains(t, seed, "|first_user=")
 	require.Contains(t, seed, "Hello from typed message")
 }
+
+func TestDeriveOpenAIReasoningSessionSeed_AnthropicThinkingSignature(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.5",
+		"messages":[
+			{"role":"assistant","content":[{"type":"thinking","thinking":"kept","signature":"oai2#payload"}]},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	seed := deriveOpenAIReasoningSessionSeed(body)
+	require.NotEmpty(t, seed)
+	require.Contains(t, seed, reasoningSessionSeedPrefix)
+	require.NotContains(t, seed, "oai2#payload")
+}
+
+func TestDeriveOpenAIReasoningSessionSeed_ResponsesReasoningItem(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"reasoning","id":"rs_1","encrypted_content":"enc@payload"},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	seed := deriveOpenAIReasoningSessionSeed(body)
+	require.NotEmpty(t, seed)
+	require.Contains(t, seed, reasoningSessionSeedPrefix)
+	require.NotContains(t, seed, "enc@payload")
+}
+
+func TestDeriveOpenAIReasoningSessionSeed_EmptyWithoutReasoning(t *testing.T) {
+	require.Empty(t, deriveOpenAIReasoningSessionSeed([]byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`)))
+}

@@ -2704,6 +2704,101 @@
                 </div>
                 <Toggle v-model="form.openai_advanced_scheduler_enabled" />
               </div>
+
+              <div class="rounded-xl border border-gray-200 p-4 dark:border-dark-600">
+                <div class="flex items-start justify-between gap-4">
+                  <div>
+                    <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                      {{ localText("模型优先配置", "Model priority rules") }}
+                    </label>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      {{
+                        localText(
+                          "按模型前缀优先尝试指定账号；若优先账号不可用，会自动回退到现有调度策略。",
+                          "Prefer specified accounts by model prefix, then fall back to the existing scheduler when they are unavailable.",
+                        )
+                      }}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    data-testid="openai-model-priority-add-rule"
+                    @click="addOpenAIModelPriorityRule"
+                  >
+                    {{ localText("新增规则", "Add rule") }}
+                  </button>
+                </div>
+
+                <div
+                  v-if="openAIModelPriorityRules.length === 0"
+                  class="mt-3 rounded-lg border border-dashed border-gray-200 px-4 py-3 text-sm text-gray-500 dark:border-dark-600 dark:text-gray-400"
+                >
+                  {{
+                    localText(
+                      "暂无规则。命中规则时会先尝试这里配置的账号顺序。",
+                      "No rules yet. Matching requests will try these preferred accounts first.",
+                    )
+                  }}
+                </div>
+
+                <div v-else class="mt-4 space-y-3">
+                  <div
+                    v-for="(rule, index) in openAIModelPriorityRules"
+                    :key="`openai-model-priority-rule-${index}`"
+                    class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+                  >
+                    <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] lg:items-start">
+                      <div>
+                        <label class="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">
+                          {{ localText("模型前缀", "Model prefix") }}
+                        </label>
+                        <input
+                          v-model="rule.prefix"
+                          :data-testid="`openai-model-priority-prefix-${index}`"
+                          type="text"
+                          class="input"
+                          :placeholder="localText('例如 gpt-5.5', 'e.g. gpt-5.5')"
+                        />
+                      </div>
+                      <div>
+                        <label class="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">
+                          {{ localText("优先账号 ID", "Preferred account IDs") }}
+                        </label>
+                        <input
+                          v-model="rule.preferred_account_ids_input"
+                          :data-testid="`openai-model-priority-account-ids-${index}`"
+                          type="text"
+                          class="input"
+                          :placeholder="localText('例如 12, 34, 56', 'e.g. 12, 34, 56')"
+                        />
+                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                          {{ localText("使用逗号分隔；会自动去重并保留顺序。", "Use commas; duplicates are removed while keeping order.") }}
+                        </p>
+                      </div>
+                      <div class="flex items-center gap-2 pt-6">
+                        <Toggle
+                          v-model="rule.enabled"
+                          :data-testid="`openai-model-priority-enabled-${index}`"
+                        />
+                        <span class="text-xs text-gray-600 dark:text-gray-300">
+                          {{ localText("启用", "Enabled") }}
+                        </span>
+                      </div>
+                      <div class="pt-6">
+                        <button
+                          type="button"
+                          class="btn btn-secondary btn-sm"
+                          :data-testid="`openai-model-priority-remove-${index}`"
+                          @click="removeOpenAIModelPriorityRule(index)"
+                        >
+                          {{ localText("删除", "Remove") }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -4790,6 +4885,7 @@ import type {
   SystemSettings,
   UpdateSettingsRequest,
   DefaultSubscriptionSetting,
+  OpenAIModelPriorityRule,
   WeChatConnectMode,
   WebSearchEmulationConfig,
   WebSearchProviderConfig,
@@ -4873,6 +4969,12 @@ const testEmailAddress = ref("");
 const registrationEmailSuffixWhitelistTags = ref<string[]>([]);
 const registrationEmailSuffixWhitelistDraft = ref("");
 const tablePageSizeOptionsInput = ref("10, 20, 50, 100");
+type OpenAIModelPriorityRuleFormItem = {
+  prefix: string;
+  preferred_account_ids_input: string;
+  enabled: boolean;
+};
+const openAIModelPriorityRules = ref<OpenAIModelPriorityRuleFormItem[]>([]);
 
 // Admin API Key 状态
 const adminApiKeyLoading = ref(true);
@@ -5611,6 +5713,124 @@ function parseTablePageSizeOptionsInput(raw: string): number[] | null {
   return deduped;
 }
 
+function formatOpenAIModelPriorityAccountIDs(ids: number[]): string {
+  return ids.join(", ");
+}
+
+function parseOpenAIModelPriorityAccountIDsInput(raw: string): number[] | null {
+  const tokens = raw
+    .split(/[，,]/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+
+  if (tokens.length === 0) {
+    return [];
+  }
+
+  const parsed: number[] = [];
+  const seen = new Set<number>();
+  for (const token of tokens) {
+    if (!/^\d+$/.test(token)) {
+      return null;
+    }
+    const value = Number(token);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      return null;
+    }
+    if (!seen.has(value)) {
+      seen.add(value);
+      parsed.push(value);
+    }
+  }
+
+  return parsed;
+}
+
+function setOpenAIModelPriorityRules(
+  rules: OpenAIModelPriorityRule[] | null | undefined,
+) {
+  openAIModelPriorityRules.value = Array.isArray(rules)
+    ? rules.map((rule) => ({
+        prefix: String(rule.prefix || ""),
+        preferred_account_ids_input: formatOpenAIModelPriorityAccountIDs(
+          Array.isArray(rule.preferred_account_ids)
+            ? rule.preferred_account_ids
+            : [],
+        ),
+        enabled: rule.enabled !== false,
+      }))
+    : [];
+}
+
+function addOpenAIModelPriorityRule() {
+  openAIModelPriorityRules.value.push({
+    prefix: "",
+    preferred_account_ids_input: "",
+    enabled: true,
+  });
+}
+
+function removeOpenAIModelPriorityRule(index: number) {
+  openAIModelPriorityRules.value.splice(index, 1);
+}
+
+function normalizeOpenAIModelPriorityRulesForSave(): OpenAIModelPriorityRule[] | null {
+  const normalized: OpenAIModelPriorityRule[] = [];
+  const seenPrefixes = new Set<string>();
+
+  for (const [index, rule] of openAIModelPriorityRules.value.entries()) {
+    const prefix = rule.prefix.trim().toLowerCase();
+    if (!prefix) {
+      appStore.showError(
+        localText(
+          `模型优先规则 #${index + 1} 的模型前缀不能为空。`,
+          `Model priority rule #${index + 1} requires a model prefix.`,
+        ),
+      );
+      return null;
+    }
+
+    const accountIDs = parseOpenAIModelPriorityAccountIDsInput(
+      rule.preferred_account_ids_input,
+    );
+    if (accountIDs === null) {
+      appStore.showError(
+        localText(
+          `模型优先规则 #${index + 1} 的账号 ID 必须是正整数，并使用逗号分隔。`,
+          `Model priority rule #${index + 1} account IDs must be positive integers separated by commas.`,
+        ),
+      );
+      return null;
+    }
+    if (accountIDs.length === 0) {
+      appStore.showError(
+        localText(
+          `模型优先规则 #${index + 1} 至少需要一个优先账号 ID。`,
+          `Model priority rule #${index + 1} requires at least one preferred account ID.`,
+        ),
+      );
+      return null;
+    }
+    if (seenPrefixes.has(prefix)) {
+      appStore.showError(
+        localText(
+          `模型优先规则中的模型前缀不能重复：${prefix}`,
+          `Duplicate model priority rule prefix: ${prefix}`,
+        ),
+      );
+      return null;
+    }
+    seenPrefixes.add(prefix);
+    normalized.push({
+      prefix,
+      preferred_account_ids: accountIDs,
+      enabled: rule.enabled,
+    });
+  }
+
+  return normalized;
+}
+
 async function loadSettings() {
   loading.value = true;
   loadFailed.value = false;
@@ -5624,6 +5844,7 @@ async function loadSettings() {
         (form as Record<string, unknown>)[key] = value;
       }
     }
+    setOpenAIModelPriorityRules(settings.openai_model_priority_rules);
     Object.assign(authSourceDefaults, buildAuthSourceDefaultsState(settings));
     form.backend_mode_enabled = settings.backend_mode_enabled;
     form.default_subscriptions = normalizeDefaultSubscriptionSettings(
@@ -5882,6 +6103,12 @@ async function saveSettings() {
       form.wechat_connect_mode,
     );
 
+    const normalizedOpenAIModelPriorityRules =
+      normalizeOpenAIModelPriorityRulesForSave();
+    if (!normalizedOpenAIModelPriorityRules) {
+      return;
+    }
+
     const payload: UpdateSettingsRequest = {
       registration_enabled: form.registration_enabled,
       email_verify_enabled: form.email_verify_enabled,
@@ -6017,6 +6244,7 @@ async function saveSettings() {
       payment_cancel_rate_limit_window_mode:
         form.payment_cancel_rate_limit_window_mode,
       openai_advanced_scheduler_enabled: form.openai_advanced_scheduler_enabled,
+      openai_model_priority_rules: normalizedOpenAIModelPriorityRules,
       // Balance & quota notification
       balance_low_notify_enabled: form.balance_low_notify_enabled,
       balance_low_notify_threshold:
@@ -6043,6 +6271,7 @@ async function saveSettings() {
         (form as Record<string, unknown>)[key] = value;
       }
     }
+    setOpenAIModelPriorityRules(updated.openai_model_priority_rules);
     Object.assign(authSourceDefaults, buildAuthSourceDefaultsState(updated));
     registrationEmailSuffixWhitelistTags.value =
       normalizeRegistrationEmailSuffixDomains(

@@ -1,6 +1,7 @@
 package apicompat
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -408,7 +409,20 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 				items = append(items, ResponsesInputItem{Role: "assistant", Content: partsJSON})
 				textParts = nil
 			}
-			// Try compaction first (cm1# prefix)
+			if envelope := decodeOpenAIReasoningSignatureEnvelope(b.Signature); envelope != nil {
+				item := ResponsesInputItem{
+					Type:             envelope.Type,
+					ID:               envelope.ID,
+					EncryptedContent: envelope.EncryptedContent,
+					Summary:          envelope.Summary,
+					Status:           envelope.Status,
+				}
+				if item.Type == "reasoning" && len(item.Summary) == 0 {
+					item.Summary = summaryFromThinkingBlock(b.Thinking)
+				}
+				items = append(items, item)
+				continue
+			}
 			if compaction := decodeCompactionSignature(b.Signature); compaction != nil {
 				items = append(items, ResponsesInputItem{
 					Type:             "compaction",
@@ -417,27 +431,17 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 				})
 				continue
 			}
-			// Reasoning with @ separator
 			if strings.Contains(b.Signature, "@") {
 				enc, id := parseReasoningSignature(b.Signature)
 				if len(id) > maxReasoningIDLength {
 					continue
 				}
-				thinking := b.Thinking
-				if thinking == thinkingPlaceholder {
-					thinking = ""
-				}
-				item := ResponsesInputItem{
+				items = append(items, ResponsesInputItem{
 					Type:             "reasoning",
 					ID:               id,
 					EncryptedContent: enc,
-				}
-				if thinking != "" {
-					item.Summary = []ResponsesSummary{{Type: "summary_text", Text: thinking}}
-				} else {
-					item.Summary = []ResponsesSummary{{Type: "summary_text", Text: ""}}
-				}
-				items = append(items, item)
+					Summary:          summaryFromThinkingBlock(b.Thinking),
+				})
 			}
 		}
 	}
@@ -467,15 +471,88 @@ func mustMarshalAnthropicContentBlock(block AnthropicContentBlock) json.RawMessa
 }
 
 const (
-	thinkingPlaceholder          = "Thinking..."
-	compactionSignaturePrefix    = "cm1#"
-	compactionSignatureSeparator = "@"
-	maxReasoningIDLength         = 64
+	thinkingPlaceholder             = "Thinking..."
+	openAIReasoningSignaturePrefix  = "oai2#"
+	openAIReasoningSignatureVersion = 2
+	compactionSignaturePrefix       = "cm1#"
+	compactionSignatureSeparator    = "@"
+	maxReasoningIDLength            = 64
 )
+
+type openAIReasoningSignatureEnvelope struct {
+	Version          int                `json:"v"`
+	Type             string             `json:"type"`
+	ID               string             `json:"id,omitempty"`
+	EncryptedContent string             `json:"encrypted_content,omitempty"`
+	Summary          []ResponsesSummary `json:"summary,omitempty"`
+	Status           string             `json:"status,omitempty"`
+	Model            string             `json:"model,omitempty"`
+}
 
 type compactionCarrier struct {
 	id               string
 	encryptedContent string
+}
+
+func encodeReasoningItemSignature(item ResponsesOutput) string {
+	return encodeOpenAIReasoningSignatureEnvelope(openAIReasoningSignatureEnvelope{
+		Version:          openAIReasoningSignatureVersion,
+		Type:             "reasoning",
+		ID:               item.ID,
+		EncryptedContent: item.EncryptedContent,
+		Summary:          item.Summary,
+		Status:           item.Status,
+	})
+}
+
+func encodeCompactionItemSignature(item ResponsesOutput) string {
+	return encodeOpenAIReasoningSignatureEnvelope(openAIReasoningSignatureEnvelope{
+		Version:          openAIReasoningSignatureVersion,
+		Type:             "compaction",
+		ID:               item.ID,
+		EncryptedContent: item.EncryptedContent,
+		Summary:          item.Summary,
+		Status:           item.Status,
+	})
+}
+
+func encodeOpenAIReasoningSignatureEnvelope(envelope openAIReasoningSignatureEnvelope) string {
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return ""
+	}
+	return openAIReasoningSignaturePrefix + base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+func decodeOpenAIReasoningSignatureEnvelope(sig string) *openAIReasoningSignatureEnvelope {
+	if !strings.HasPrefix(sig, openAIReasoningSignaturePrefix) {
+		return nil
+	}
+	payload := strings.TrimPrefix(sig, openAIReasoningSignaturePrefix)
+	decoded, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil
+	}
+	var envelope openAIReasoningSignatureEnvelope
+	if err := json.Unmarshal(decoded, &envelope); err != nil {
+		return nil
+	}
+	if envelope.Version != openAIReasoningSignatureVersion {
+		return nil
+	}
+	switch envelope.Type {
+	case "reasoning", "compaction":
+		return &envelope
+	default:
+		return nil
+	}
+}
+
+func summaryFromThinkingBlock(thinking string) []ResponsesSummary {
+	if thinking == thinkingPlaceholder {
+		thinking = ""
+	}
+	return []ResponsesSummary{{Type: "summary_text", Text: thinking}}
 }
 
 // encodeCompactionSignature encodes a compaction carrier into a signature string.
@@ -489,7 +566,7 @@ func decodeCompactionSignature(sig string) *compactionCarrier {
 		return nil
 	}
 	raw := sig[len(compactionSignaturePrefix):]
-	sepIdx := strings.Index(raw, compactionSignatureSeparator)
+	sepIdx := strings.LastIndex(raw, compactionSignatureSeparator)
 	if sepIdx <= 0 || sepIdx == len(raw)-1 {
 		return nil
 	}

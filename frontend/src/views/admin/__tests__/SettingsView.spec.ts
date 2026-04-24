@@ -386,6 +386,7 @@ const baseSettingsResponse = {
   payment_visible_method_wxpay_source: "invalid-source",
   payment_visible_method_alipay_enabled: true,
   payment_visible_method_wxpay_enabled: true,
+  openai_model_priority_rules: [],
   openai_advanced_scheduler_enabled: false,
   balance_low_notify_enabled: false,
   balance_low_notify_threshold: 0,
@@ -442,6 +443,16 @@ async function openUsersTab(wrapper: ReturnType<typeof mountView>) {
 
   expect(usersTabButton).toBeDefined();
   await usersTabButton?.trigger("click");
+  await flushPromises();
+}
+
+async function openGatewayTab(wrapper: ReturnType<typeof mountView>) {
+  const gatewayTabButton = wrapper
+    .findAll("button")
+    .find((node) => node.text().includes("admin.settings.tabs.gateway"));
+
+  expect(gatewayTabButton).toBeDefined();
+  await gatewayTabButton?.trigger("click");
   await flushPromises();
 }
 
@@ -630,6 +641,146 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(getProviders).toHaveBeenCalledTimes(2);
   });
 
+  it("loads model priority rules into the gateway form", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_model_priority_rules: [
+        {
+          prefix: "gpt-5.5",
+          preferred_account_ids: [11, 22],
+          enabled: true,
+        },
+        {
+          prefix: "gpt-5.3-codex",
+          preferred_account_ids: [33],
+          enabled: false,
+        },
+      ],
+    });
+
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openGatewayTab(wrapper);
+
+    expect(
+      (
+        wrapper.get('[data-testid="openai-model-priority-prefix-0"]')
+          .element as HTMLInputElement
+      ).value,
+    ).toBe("gpt-5.5");
+    expect(
+      (
+        wrapper.get('[data-testid="openai-model-priority-account-ids-0"]')
+          .element as HTMLInputElement
+      ).value,
+    ).toBe("11, 22");
+    expect(
+      (
+        wrapper.get('[data-testid="openai-model-priority-enabled-0"]')
+          .element as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    expect(
+      (
+        wrapper.get('[data-testid="openai-model-priority-enabled-1"]')
+          .element as HTMLInputElement
+      ).checked,
+    ).toBe(false);
+  });
+
+  it("saves model priority rules with normalized prefixes and deduped account IDs", async () => {
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    await wrapper.get('[data-testid="openai-model-priority-add-rule"]').trigger("click");
+    await wrapper
+      .get('[data-testid="openai-model-priority-prefix-0"]')
+      .setValue(" GPT-5.5 ");
+    await wrapper
+      .get('[data-testid="openai-model-priority-account-ids-0"]')
+      .setValue("12, 34, 12");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        openai_model_priority_rules: [
+          {
+            prefix: "gpt-5.5",
+            preferred_account_ids: [12, 34],
+            enabled: true,
+          },
+        ],
+      }),
+    );
+  });
+
+  it("validates model priority rule prefixes before save", async () => {
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    await wrapper.get('[data-testid="openai-model-priority-add-rule"]').trigger("click");
+    await wrapper
+      .get('[data-testid="openai-model-priority-account-ids-0"]')
+      .setValue("12");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(showError).toHaveBeenCalledWith("模型优先规则 #1 的模型前缀不能为空。");
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("validates model priority rule account IDs before save", async () => {
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    await wrapper.get('[data-testid="openai-model-priority-add-rule"]').trigger("click");
+    await wrapper
+      .get('[data-testid="openai-model-priority-prefix-0"]')
+      .setValue("gpt-5.5");
+    await wrapper
+      .get('[data-testid="openai-model-priority-account-ids-0"]')
+      .setValue("12, abc");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(showError).toHaveBeenCalledWith(
+      "模型优先规则 #1 的账号 ID 必须是正整数，并使用逗号分隔。",
+    );
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate model priority rule prefixes before save", async () => {
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    await wrapper.get('[data-testid="openai-model-priority-add-rule"]').trigger("click");
+    await wrapper.get('[data-testid="openai-model-priority-add-rule"]').trigger("click");
+    await wrapper
+      .get('[data-testid="openai-model-priority-prefix-0"]')
+      .setValue("gpt-5.5");
+    await wrapper
+      .get('[data-testid="openai-model-priority-account-ids-0"]')
+      .setValue("12");
+    await wrapper
+      .get('[data-testid="openai-model-priority-prefix-1"]')
+      .setValue("GPT-5.5");
+    await wrapper
+      .get('[data-testid="openai-model-priority-account-ids-1"]')
+      .setValue("34");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(showError).toHaveBeenCalledWith(
+      "模型优先规则中的模型前缀不能重复：gpt-5.5",
+    );
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
   it("renders advanced scheduler copy as local experimental gateway policy", async () => {
     const wrapper = mountView();
 
@@ -652,7 +803,9 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(imageUploads.length).toBeGreaterThan(0);
 
     const paymentHelpImageUpload = imageUploads.find(
-      (node) => node.attributes("data-placeholder") === "admin.settings.payment.helpImagePlaceholder",
+      (node) =>
+        node.attributes("data-placeholder") ===
+        "admin.settings.payment.helpImagePlaceholder",
     );
 
     expect(paymentHelpImageUpload).toBeDefined();

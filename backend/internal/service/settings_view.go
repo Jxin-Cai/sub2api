@@ -11,6 +11,12 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+type OpenAIModelPriorityRule struct {
+	Prefix              string  `json:"prefix"`
+	PreferredAccountIDs []int64 `json:"preferred_account_ids"`
+	Enabled             bool    `json:"enabled"`
+}
+
 type SystemSettings struct {
 	RegistrationEnabled              bool
 	EmailVerifyEnabled               bool
@@ -159,6 +165,7 @@ type SystemSettings struct {
 
 	// OpenAI account scheduling
 	OpenAIAdvancedSchedulerEnabled bool
+	OpenAIModelPriorityRules       []OpenAIModelPriorityRule
 
 	// Balance low notification
 	BalanceLowNotifyEnabled     bool

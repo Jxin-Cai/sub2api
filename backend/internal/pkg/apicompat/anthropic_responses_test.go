@@ -464,7 +464,13 @@ func TestStreamingReasoning(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.Equal(t, "content_block_delta", events[0].Type)
 	assert.Equal(t, "signature_delta", events[0].Delta.Type)
-	assert.Equal(t, "enc_data@rs_abc123", events[0].Delta.Signature)
+	require.NotEmpty(t, events[0].Delta.Signature)
+	assert.Contains(t, events[0].Delta.Signature, openAIReasoningSignaturePrefix)
+	decoded := decodeOpenAIReasoningSignatureEnvelope(events[0].Delta.Signature)
+	require.NotNil(t, decoded)
+	assert.Equal(t, "reasoning", decoded.Type)
+	assert.Equal(t, "enc_data", decoded.EncryptedContent)
+	assert.Equal(t, "rs_abc123", decoded.ID)
 }
 
 func TestStreamingIncomplete(t *testing.T) {
@@ -955,10 +961,6 @@ func TestAnthropicToResponses_NoOutputConfig(t *testing.T) {
 	assert.Equal(t, "high", resp.Reasoning.Effort)
 }
 
-
-
-
-
 func TestAnthropicToResponses_OutputConfigWithoutEffort(t *testing.T) {
 	req := &AnthropicRequest{
 		Model:        "gpt-5.2",
@@ -1248,9 +1250,97 @@ func TestAnthropicToResponses_ImageEmptyMediaType(t *testing.T) {
 	assert.Equal(t, "data:image/png;base64,iVBOR", parts[0].ImageURL)
 }
 
-// ---------------------------------------------------------------------------
-// normalizeToolParameters tests
-// ---------------------------------------------------------------------------
+func TestDecodeCompactionSignature_PreservesEncryptedContentWithAtSigns(t *testing.T) {
+	encryptedContent := "enc@part1@@part2"
+	id := "rs_123"
+
+	decoded := decodeCompactionSignature(encodeCompactionSignature(id, encryptedContent))
+	require.NotNil(t, decoded)
+	assert.Equal(t, encryptedContent, decoded.encryptedContent)
+	assert.Equal(t, id, decoded.id)
+}
+
+func TestOpenAIReasoningSignatureEnvelope_RoundTripsReasoning(t *testing.T) {
+	item := ResponsesOutput{
+		Type:             "reasoning",
+		ID:               "rs_123",
+		EncryptedContent: "enc@part1#part2",
+		Summary:          []ResponsesSummary{{Type: "summary_text", Text: "kept summary"}},
+		Status:           "completed",
+	}
+
+	decoded := decodeOpenAIReasoningSignatureEnvelope(encodeReasoningItemSignature(item))
+	require.NotNil(t, decoded)
+	assert.Equal(t, openAIReasoningSignatureVersion, decoded.Version)
+	assert.Equal(t, "reasoning", decoded.Type)
+	assert.Equal(t, item.ID, decoded.ID)
+	assert.Equal(t, item.EncryptedContent, decoded.EncryptedContent)
+	assert.Equal(t, item.Summary, decoded.Summary)
+	assert.Equal(t, item.Status, decoded.Status)
+}
+
+func TestOpenAIReasoningSignatureEnvelope_RoundTripsCompaction(t *testing.T) {
+	item := ResponsesOutput{
+		Type:             "compaction",
+		ID:               "rs_compact",
+		EncryptedContent: "enc@compact#payload",
+		Summary:          []ResponsesSummary{{Type: "summary_text", Text: "compact summary"}},
+		Status:           "completed",
+	}
+
+	decoded := decodeOpenAIReasoningSignatureEnvelope(encodeCompactionItemSignature(item))
+	require.NotNil(t, decoded)
+	assert.Equal(t, "compaction", decoded.Type)
+	assert.Equal(t, item.ID, decoded.ID)
+	assert.Equal(t, item.EncryptedContent, decoded.EncryptedContent)
+	assert.Equal(t, item.Summary, decoded.Summary)
+	assert.Equal(t, item.Status, decoded.Status)
+}
+
+func TestResponsesAnthropicReasoningEnvelope_RoundTripPreservesFields(t *testing.T) {
+	original := &ResponsesResponse{
+		ID:     "resp_reasoning_roundtrip",
+		Model:  "gpt-5.5",
+		Status: "completed",
+		Output: []ResponsesOutput{
+			{
+				Type:             "reasoning",
+				ID:               "rs_roundtrip",
+				EncryptedContent: "enc@roundtrip#payload",
+				Summary:          []ResponsesSummary{{Type: "summary_text", Text: "roundtrip summary"}},
+				Status:           "completed",
+			},
+			{
+				Type:    "message",
+				Content: []ResponsesContentPart{{Type: "output_text", Text: "answer"}},
+			},
+		},
+	}
+
+	anthropic := ResponsesToAnthropic(original, "claude-opus-4-6")
+	require.Len(t, anthropic.Content, 2)
+	assert.Equal(t, "thinking", anthropic.Content[0].Type)
+	assert.Contains(t, anthropic.Content[0].Signature, openAIReasoningSignaturePrefix)
+
+	converted, err := AnthropicToResponses(&AnthropicRequest{
+		Model:     "gpt-5.5",
+		MaxTokens: 1024,
+		Messages: []AnthropicMessage{{
+			Role:    "assistant",
+			Content: mustMarshalJSON(anthropic.Content),
+		}},
+	})
+	require.NoError(t, err)
+
+	var items []ResponsesInputItem
+	require.NoError(t, json.Unmarshal(converted.Input, &items))
+	require.Len(t, items, 2)
+	assert.Equal(t, "reasoning", items[0].Type)
+	assert.Equal(t, "rs_roundtrip", items[0].ID)
+	assert.Equal(t, "enc@roundtrip#payload", items[0].EncryptedContent)
+	assert.Equal(t, []ResponsesSummary{{Type: "summary_text", Text: "roundtrip summary"}}, items[0].Summary)
+	assert.Equal(t, "completed", items[0].Status)
+}
 
 func TestNormalizeToolParameters(t *testing.T) {
 	tests := []struct {
@@ -1466,12 +1556,11 @@ func TestResponsesToAnthropicRequest_MCPRoundTripFields(t *testing.T) {
 	assert.JSONEq(t, `[{"type":"text","text":"found"}]`, string(userBlocks[0].Content))
 }
 
-
 func TestAnthropicToResponses_ContextManagementCompaction(t *testing.T) {
 	req := &AnthropicRequest{
-		Model:     "gpt-5.2",
-		MaxTokens: 1024,
-		Messages:  []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+		Model:             "gpt-5.2",
+		MaxTokens:         1024,
+		Messages:          []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
 		ContextManagement: json.RawMessage(`{"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":150000}},{"type":"clear_function_results"}]}`),
 	}
 

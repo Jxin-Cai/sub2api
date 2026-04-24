@@ -43,6 +43,36 @@ func scopesContainOpenID(scopes string) bool {
 	return false
 }
 
+func openAIModelPriorityRulesToDTO(rules []service.OpenAIModelPriorityRule) []dto.OpenAIModelPriorityRule {
+	if len(rules) == 0 {
+		return []dto.OpenAIModelPriorityRule{}
+	}
+	converted := make([]dto.OpenAIModelPriorityRule, 0, len(rules))
+	for _, rule := range rules {
+		converted = append(converted, dto.OpenAIModelPriorityRule{
+			Prefix:              rule.Prefix,
+			PreferredAccountIDs: append([]int64(nil), rule.PreferredAccountIDs...),
+			Enabled:             rule.Enabled,
+		})
+	}
+	return converted
+}
+
+func openAIModelPriorityRulesToService(rules []dto.OpenAIModelPriorityRule) []service.OpenAIModelPriorityRule {
+	if len(rules) == 0 {
+		return []service.OpenAIModelPriorityRule{}
+	}
+	converted := make([]service.OpenAIModelPriorityRule, 0, len(rules))
+	for _, rule := range rules {
+		converted = append(converted, service.OpenAIModelPriorityRule{
+			Prefix:              rule.Prefix,
+			PreferredAccountIDs: append([]int64(nil), rule.PreferredAccountIDs...),
+			Enabled:             rule.Enabled,
+		})
+	}
+	return converted
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
@@ -52,7 +82,6 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// SettingHandler 系统设置处理器
 type SettingHandler struct {
 	settingService       *service.SettingService
 	emailService         *service.EmailService
@@ -211,6 +240,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		PaymentVisibleMethodAlipayEnabled:      settings.PaymentVisibleMethodAlipayEnabled,
 		PaymentVisibleMethodWxpayEnabled:       settings.PaymentVisibleMethodWxpayEnabled,
 		OpenAIAdvancedSchedulerEnabled:         settings.OpenAIAdvancedSchedulerEnabled,
+		OpenAIModelPriorityRules:               openAIModelPriorityRulesToDTO(settings.OpenAIModelPriorityRules),
 		BalanceLowNotifyEnabled:                settings.BalanceLowNotifyEnabled,
 		BalanceLowNotifyThreshold:              settings.BalanceLowNotifyThreshold,
 		BalanceLowNotifyRechargeURL:            settings.BalanceLowNotifyRechargeURL,
@@ -400,7 +430,8 @@ type UpdateSettingsRequest struct {
 	PaymentVisibleMethodWxpayEnabled  *bool   `json:"payment_visible_method_wxpay_enabled"`
 
 	// OpenAI account scheduling
-	OpenAIAdvancedSchedulerEnabled *bool `json:"openai_advanced_scheduler_enabled"`
+	OpenAIAdvancedSchedulerEnabled *bool                          `json:"openai_advanced_scheduler_enabled"`
+	OpenAIModelPriorityRules       *[]dto.OpenAIModelPriorityRule `json:"openai_model_priority_rules"`
 
 	// Balance low notification
 	BalanceLowNotifyEnabled     *bool                   `json:"balance_low_notify_enabled"`
@@ -1204,6 +1235,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.OpenAIAdvancedSchedulerEnabled
 		}(),
+		OpenAIModelPriorityRules: func() []service.OpenAIModelPriorityRule {
+			if req.OpenAIModelPriorityRules != nil {
+				return openAIModelPriorityRulesToService(*req.OpenAIModelPriorityRules)
+			}
+			return previousSettings.OpenAIModelPriorityRules
+		}(),
 		BalanceLowNotifyEnabled: func() bool {
 			if req.BalanceLowNotifyEnabled != nil {
 				return *req.BalanceLowNotifyEnabled
@@ -1458,6 +1495,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		PaymentVisibleMethodAlipayEnabled:      updatedSettings.PaymentVisibleMethodAlipayEnabled,
 		PaymentVisibleMethodWxpayEnabled:       updatedSettings.PaymentVisibleMethodWxpayEnabled,
 		OpenAIAdvancedSchedulerEnabled:         updatedSettings.OpenAIAdvancedSchedulerEnabled,
+		OpenAIModelPriorityRules:               openAIModelPriorityRulesToDTO(updatedSettings.OpenAIModelPriorityRules),
 		BalanceLowNotifyEnabled:                updatedSettings.BalanceLowNotifyEnabled,
 		BalanceLowNotifyThreshold:              updatedSettings.BalanceLowNotifyThreshold,
 		BalanceLowNotifyRechargeURL:            updatedSettings.BalanceLowNotifyRechargeURL,
@@ -1827,6 +1865,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	}
 	if before.OpenAIAdvancedSchedulerEnabled != after.OpenAIAdvancedSchedulerEnabled {
 		changed = append(changed, "openai_advanced_scheduler_enabled")
+	}
+	if service.MarshalOpenAIModelPriorityRules(before.OpenAIModelPriorityRules) != service.MarshalOpenAIModelPriorityRules(after.OpenAIModelPriorityRules) {
+		changed = append(changed, "openai_model_priority_rules")
 	}
 	// Balance & quota notification
 	if before.BalanceLowNotifyEnabled != after.BalanceLowNotifyEnabled {

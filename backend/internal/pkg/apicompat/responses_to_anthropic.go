@@ -38,7 +38,7 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 			if summaryText == "" {
 				summaryText = thinkingPlaceholder
 			}
-			sig := encodeReasoningSignature(item.EncryptedContent, item.ID)
+			sig := encodeReasoningItemSignature(item)
 			blocks = append(blocks, AnthropicContentBlock{
 				Type:      "thinking",
 				Thinking:  summaryText,
@@ -49,7 +49,7 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 				blocks = append(blocks, AnthropicContentBlock{
 					Type:      "thinking",
 					Thinking:  thinkingPlaceholder,
-					Signature: encodeCompactionSignature(item.ID, item.EncryptedContent),
+					Signature: encodeCompactionItemSignature(item),
 				})
 			}
 		case "message":
@@ -739,7 +739,7 @@ func resToAnthHandleReasoningItemDone(evt *ResponsesStreamEvent, state *Response
 		})
 	}
 
-	sig := encodeReasoningSignature(evt.Item.EncryptedContent, evt.Item.ID)
+	sig := encodeReasoningItemSignature(*evt.Item)
 	events = append(events, AnthropicStreamEvent{
 		Type:  "content_block_delta",
 		Index: &blockIdx,
@@ -788,7 +788,7 @@ func resToAnthHandleCompactionItemDone(evt *ResponsesStreamEvent, state *Respons
 		Index: &idx,
 		Delta: &AnthropicDelta{
 			Type:      "signature_delta",
-			Signature: encodeCompactionSignature(evt.Item.ID, evt.Item.EncryptedContent),
+			Signature: encodeCompactionItemSignature(*evt.Item),
 		},
 	})
 

@@ -295,6 +295,12 @@ export function deriveWeChatConnectStoredMode(
 /**
  * System settings interface
  */
+export interface OpenAIModelPriorityRule {
+  prefix: string;
+  preferred_account_ids: number[];
+  enabled: boolean;
+}
+
 export interface SystemSettings {
   // Registration settings
   registration_enabled: boolean;
@@ -463,6 +469,7 @@ export interface SystemSettings {
   payment_visible_method_alipay_enabled?: boolean;
   payment_visible_method_wxpay_enabled?: boolean;
   openai_advanced_scheduler_enabled?: boolean;
+  openai_model_priority_rules?: OpenAIModelPriorityRule[];
 
   // Balance & quota notification
   balance_low_notify_enabled: boolean;
@@ -621,6 +628,7 @@ export interface UpdateSettingsRequest {
   payment_visible_method_alipay_enabled?: boolean;
   payment_visible_method_wxpay_enabled?: boolean;
   openai_advanced_scheduler_enabled?: boolean;
+  openai_model_priority_rules?: OpenAIModelPriorityRule[];
   // Balance & quota notification
   balance_low_notify_enabled?: boolean;
   balance_low_notify_threshold?: number;

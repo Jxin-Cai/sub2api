@@ -9,7 +9,57 @@ import (
 
 // contentSessionSeedPrefix prevents collisions between content-derived seeds
 // and explicit session IDs (e.g. "sess-xxx" or "compat_cc_xxx").
-const contentSessionSeedPrefix = "compat_cs_"
+const (
+	contentSessionSeedPrefix   = "compat_cs_"
+	reasoningSessionSeedPrefix = "compat_reasoning_"
+)
+
+func deriveOpenAIReasoningSessionSeed(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+
+	var signatures []string
+	messages := gjson.GetBytes(body, "messages")
+	if messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.Exists() || !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(_, block gjson.Result) bool {
+				if block.Get("type").String() == "thinking" {
+					if sig := strings.TrimSpace(block.Get("signature").String()); sig != "" {
+						signatures = append(signatures, sig)
+					}
+				}
+				return true
+			})
+			return true
+		})
+	}
+
+	input := gjson.GetBytes(body, "input")
+	if input.Exists() && input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			itemType := strings.TrimSpace(item.Get("type").String())
+			if itemType != "reasoning" && itemType != "compaction" {
+				return true
+			}
+			id := strings.TrimSpace(item.Get("id").String())
+			enc := strings.TrimSpace(item.Get("encrypted_content").String())
+			if id != "" || enc != "" {
+				signatures = append(signatures, itemType+"|"+id+"|"+enc)
+			}
+			return true
+		})
+	}
+
+	if len(signatures) == 0 {
+		return ""
+	}
+	return reasoningSessionSeedPrefix + hashSensitiveValueForLog(strings.Join(signatures, "|"))
+}
 
 // deriveOpenAIContentSessionSeed builds a stable session seed from an
 // OpenAI-format request body. Only fields constant across conversation turns
