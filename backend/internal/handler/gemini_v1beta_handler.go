@@ -491,7 +491,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				}
 			}
 			// ForwardNative already wrote the response
-			reqLog.Error("gemini.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+			reqLog.Error("gemini.forward_failed", append([]zap.Field{zap.Int64("account_id", account.ID), zap.Error(err)}, upstreamErrorLogFields(c)...)...)
 			return
 		}
 
@@ -546,10 +546,19 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				).Error("gemini.record_usage_failed", zap.Error(err))
 			}
 		})
-		reqLog.Debug("gemini.request_completed",
-			zap.Int64("account_id", account.ID),
-			zap.Int("switch_count", fs.SwitchCount),
-		)
+		logRequestCompletedCompact(reqLog, "gemini.request_completed", requestCompletedLogInput{
+			Endpoint:             "gemini.v1beta",
+			Model:                modelName,
+			UpstreamModel:        result.UpstreamModel,
+			AccountID:            account.ID,
+			StatusCode:           http.StatusOK,
+			InputTokens:          result.Usage.InputTokens,
+			CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+			OutputTokens:         result.Usage.OutputTokens,
+			Stream:               result.Stream,
+			Duration:             result.Duration,
+			FirstTokenMs:         result.FirstTokenMs,
+		}, zap.Int("switch_count", fs.SwitchCount))
 		return
 	}
 }

@@ -372,6 +372,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				zap.Bool("fallback_error_response_written", wroteFallback),
 				zap.Error(err),
 			}
+			fields = append(fields, upstreamErrorLogFields(c)...)
 			if shouldLogOpenAIForwardFailureAsWarn(c, wroteFallback) {
 				reqLog.Warn("openai.forward_failed", fields...)
 				return
@@ -419,10 +420,19 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				).Error("openai.record_usage_failed", zap.Error(err))
 			}
 		})
-		reqLog.Debug("openai.request_completed",
-			zap.Int64("account_id", account.ID),
-			zap.Int("switch_count", switchCount),
-		)
+		logRequestCompletedCompact(reqLog, "openai.request_completed", requestCompletedLogInput{
+			Endpoint:             "openai.responses",
+			Model:                reqModel,
+			UpstreamModel:        result.UpstreamModel,
+			AccountID:            account.ID,
+			StatusCode:           http.StatusOK,
+			InputTokens:          result.Usage.InputTokens,
+			CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+			OutputTokens:         result.Usage.OutputTokens,
+			Stream:               result.Stream,
+			Duration:             result.Duration,
+			FirstTokenMs:         result.FirstTokenMs,
+		}, zap.Int("switch_count", switchCount))
 		return
 	}
 }
@@ -615,6 +625,7 @@ func (h *OpenAIGatewayHandler) handleResponsesRetrieve(
 				zap.Bool("fallback_error_response_written", wroteFallback),
 				zap.Error(err),
 			}
+			fields = append(fields, upstreamErrorLogFields(c)...)
 			if shouldLogOpenAIForwardFailureAsWarn(c, wroteFallback) {
 				reqLog.Warn("openai.retrieve_failed", fields...)
 				return
@@ -960,11 +971,13 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 			wroteFallback := h.ensureAnthropicErrorResponse(c, streamStarted)
-			reqLog.Warn("openai_messages.forward_failed",
+			fields := []zap.Field{
 				zap.Int64("account_id", account.ID),
 				zap.Bool("fallback_error_response_written", wroteFallback),
 				zap.Error(err),
-			)
+			}
+			fields = append(fields, upstreamErrorLogFields(c)...)
+			reqLog.Warn("openai_messages.forward_failed", fields...)
 			return
 		}
 		if result != nil {
@@ -1002,10 +1015,19 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				).Error("openai_messages.record_usage_failed", zap.Error(err))
 			}
 		})
-		reqLog.Debug("openai_messages.request_completed",
-			zap.Int64("account_id", account.ID),
-			zap.Int("switch_count", switchCount),
-		)
+		logRequestCompletedCompact(reqLog, "openai_messages.request_completed", requestCompletedLogInput{
+			Endpoint:             "openai.messages",
+			Model:                reqModel,
+			UpstreamModel:        result.UpstreamModel,
+			AccountID:            account.ID,
+			StatusCode:           http.StatusOK,
+			InputTokens:          result.Usage.InputTokens,
+			CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+			OutputTokens:         result.Usage.OutputTokens,
+			Stream:               result.Stream,
+			Duration:             result.Duration,
+			FirstTokenMs:         result.FirstTokenMs,
+		}, zap.Int("switch_count", switchCount))
 		return
 	}
 }
@@ -1503,6 +1525,19 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					)
 				}
 			})
+			logRequestCompletedCompact(reqLog, "openai.websocket_request_completed", requestCompletedLogInput{
+				Endpoint:             "openai.responses.websocket",
+				Model:                reqModel,
+				UpstreamModel:        result.UpstreamModel,
+				AccountID:            account.ID,
+				StatusCode:           http.StatusOK,
+				InputTokens:          result.Usage.InputTokens,
+				CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+				OutputTokens:         result.Usage.OutputTokens,
+				Stream:               true,
+				Duration:             result.Duration,
+				FirstTokenMs:         result.FirstTokenMs,
+			}, zap.Int("turn", turn))
 		},
 	}
 

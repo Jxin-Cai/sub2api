@@ -241,6 +241,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				zap.Bool("fallback_error_response_written", wroteFallback),
 				zap.Error(err),
 			}
+			fields = append(fields, upstreamErrorLogFields(c)...)
 			if shouldLogOpenAIForwardFailureAsWarn(c, wroteFallback) {
 				reqLog.Warn("openai.images.forward_failed", fields...)
 				return
@@ -291,10 +292,18 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			}
 		})
 
-		reqLog.Debug("openai.images.request_completed",
-			zap.Int64("account_id", account.ID),
-			zap.Int("switch_count", switchCount),
-		)
+		logRequestCompletedCompact(reqLog, "openai.images.request_completed", requestCompletedLogInput{
+			Endpoint:             "openai.images",
+			Model:                parsed.Model,
+			UpstreamModel:        result.UpstreamModel,
+			AccountID:            account.ID,
+			StatusCode:           http.StatusOK,
+			InputTokens:          result.Usage.InputTokens,
+			CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+			OutputTokens:         result.Usage.OutputTokens,
+			Stream:               result.Stream,
+			Duration:             result.Duration,
+		}, zap.Int("switch_count", switchCount))
 		return
 	}
 }

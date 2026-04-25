@@ -251,9 +251,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
 			wroteFallback := h.ensureForwardErrorResponse(c, streamStarted)
 			reqLog.Warn("openai_chat_completions.forward_failed",
-				zap.Int64("account_id", account.ID),
-				zap.Bool("fallback_error_response_written", wroteFallback),
-				zap.Error(err),
+				append([]zap.Field{
+					zap.Int64("account_id", account.ID),
+					zap.Bool("fallback_error_response_written", wroteFallback),
+					zap.Error(err),
+				}, upstreamErrorLogFields(c)...)...,
 			)
 			return
 		}
@@ -290,10 +292,19 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				).Error("openai_chat_completions.record_usage_failed", zap.Error(err))
 			}
 		})
-		reqLog.Debug("openai_chat_completions.request_completed",
-			zap.Int64("account_id", account.ID),
-			zap.Int("switch_count", switchCount),
-		)
+		logRequestCompletedCompact(reqLog, "openai_chat_completions.request_completed", requestCompletedLogInput{
+			Endpoint:             "openai.chat_completions",
+			Model:                reqModel,
+			UpstreamModel:        result.UpstreamModel,
+			AccountID:            account.ID,
+			StatusCode:           http.StatusOK,
+			InputTokens:          result.Usage.InputTokens,
+			CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+			OutputTokens:         result.Usage.OutputTokens,
+			Stream:               result.Stream,
+			Duration:             result.Duration,
+			FirstTokenMs:         result.FirstTokenMs,
+		}, zap.Int("switch_count", switchCount))
 		return
 	}
 }

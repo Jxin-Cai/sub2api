@@ -459,6 +459,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				} else if account.ProxyID != nil {
 					forwardFailedFields = append(forwardFailedFields, zap.Int64p("proxy_id", account.ProxyID))
 				}
+				forwardFailedFields = append(forwardFailedFields, upstreamErrorLogFields(c)...)
 				reqLog.Error("gateway.forward_failed", forwardFailedFields...)
 				return
 			}
@@ -510,6 +511,19 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Int64("account_id", account.ID),
 					).Error("gateway.record_usage_failed", zap.Error(err))
 				}
+			})
+			logRequestCompletedCompact(reqLog, "gateway.request_completed", requestCompletedLogInput{
+				Endpoint:             "gateway.messages",
+				Model:                reqModel,
+				UpstreamModel:        result.UpstreamModel,
+				AccountID:            account.ID,
+				StatusCode:           http.StatusOK,
+				InputTokens:          result.Usage.InputTokens,
+				CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+				OutputTokens:         result.Usage.OutputTokens,
+				Stream:               result.Stream,
+				Duration:             result.Duration,
+				FirstTokenMs:         result.FirstTokenMs,
 			})
 			return
 		}
@@ -816,6 +830,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				} else if account.ProxyID != nil {
 					forwardFailedFields = append(forwardFailedFields, zap.Int64p("proxy_id", account.ProxyID))
 				}
+				forwardFailedFields = append(forwardFailedFields, upstreamErrorLogFields(c)...)
 				reqLog.Error("gateway.forward_failed", forwardFailedFields...)
 				return
 			}
@@ -868,6 +883,19 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					).Error("gateway.record_usage_failed", zap.Error(err))
 				}
 			})
+			logRequestCompletedCompact(reqLog, "gateway.request_completed", requestCompletedLogInput{
+				Endpoint:             "gateway.messages",
+				Model:                reqModel,
+				UpstreamModel:        result.UpstreamModel,
+				AccountID:            account.ID,
+				StatusCode:           http.StatusOK,
+				InputTokens:          result.Usage.InputTokens,
+				CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+				OutputTokens:         result.Usage.OutputTokens,
+				Stream:               result.Stream,
+				Duration:             result.Duration,
+				FirstTokenMs:         result.FirstTokenMs,
+			}, zap.Bool("fallback_used", fallbackUsed), zap.Int("switch_count", fs.SwitchCount))
 			return
 		}
 		if !retryWithFallback {
@@ -1497,7 +1525,10 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 
 	// 转发请求（不记录使用量）
 	if err := h.gatewayService.ForwardCountTokens(c.Request.Context(), c, account, parsedReq); err != nil {
-		reqLog.Error("gateway.count_tokens_forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		reqLog.Error("gateway.count_tokens_forward_failed", append([]zap.Field{
+			zap.Int64("account_id", account.ID),
+			zap.Error(err),
+		}, upstreamErrorLogFields(c)...)...)
 		// 错误响应已在 ForwardCountTokens 中处理
 		return
 	}

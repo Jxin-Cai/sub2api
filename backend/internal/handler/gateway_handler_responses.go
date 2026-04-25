@@ -245,10 +245,10 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				}
 			}
 			h.ensureForwardErrorResponse(c, streamStarted)
-			reqLog.Error("gateway.responses.forward_failed",
+			reqLog.Error("gateway.responses.forward_failed", append([]zap.Field{
 				zap.Int64("account_id", account.ID),
 				zap.Error(err),
-			)
+			}, upstreamErrorLogFields(c)...)...)
 			return
 		}
 
@@ -279,6 +279,19 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 					zap.Error(err),
 				)
 			}
+		})
+		logRequestCompletedCompact(reqLog, "gateway.responses.request_completed", requestCompletedLogInput{
+			Endpoint:             "gateway.responses",
+			Model:                reqModel,
+			UpstreamModel:        result.UpstreamModel,
+			AccountID:            account.ID,
+			StatusCode:           http.StatusOK,
+			InputTokens:          result.Usage.InputTokens,
+			CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+			OutputTokens:         result.Usage.OutputTokens,
+			Stream:               result.Stream,
+			Duration:             result.Duration,
+			FirstTokenMs:         result.FirstTokenMs,
 		})
 		return
 	}
