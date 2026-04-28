@@ -547,6 +547,7 @@ func (h *OpenAIGatewayHandler) handleResponsesRetrieve(
 			"",
 			failedAccountIDs,
 			service.OpenAIUpstreamTransportHTTPSSE,
+			false,
 		)
 		if err != nil {
 			reqLog.Warn("openai.account_select_failed",
