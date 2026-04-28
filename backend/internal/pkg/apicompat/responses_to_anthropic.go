@@ -78,7 +78,7 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 			}
 			blocks = append(blocks, AnthropicContentBlock{
 				Type:       blockType,
-				ID:         fromResponsesCallID(item.CallID),
+				ID:         fromResponsesCallIDToAnthropic(item.CallID),
 				Name:       item.Name,
 				ServerName: item.Namespace,
 				Input:      sanitizeAnthropicToolUseInput(item.Name, item.Arguments),
@@ -599,33 +599,6 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 			PartialJSON: evt.Delta,
 		},
 	}}
-}
-
-func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
-	if state.CurrentBlockType != "tool_use" || state.CurrentToolName != "Read" {
-		return resToAnthHandleBlockDone(state)
-	}
-
-	raw := evt.Arguments
-	if raw == "" {
-		raw = state.CurrentToolArgs
-	}
-	sanitized := sanitizeAnthropicToolUseInput(state.CurrentToolName, raw)
-	if len(sanitized) == 0 {
-		return closeCurrentBlock(state)
-	}
-
-	idx := state.ContentBlockIndex
-	events := []AnthropicStreamEvent{{
-		Type:  "content_block_delta",
-		Index: &idx,
-		Delta: &AnthropicDelta{
-			Type:        "input_json_delta",
-			PartialJSON: string(sanitized),
-		},
-	}}
-	events = append(events, closeCurrentBlock(state)...)
-	return events
 }
 
 func resToAnthHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
