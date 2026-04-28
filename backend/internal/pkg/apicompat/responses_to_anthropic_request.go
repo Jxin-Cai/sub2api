@@ -526,8 +526,11 @@ func convertResponsesToAnthropicTools(tools []ResponsesTool) ([]AnthropicTool, [
 	var mcpServers []AnthropicMCPServer
 	for _, t := range tools {
 		switch t.Type {
-		case "web_search":
-			out = append(out, AnthropicTool{Type: "web_search_20250305", Name: "web_search"})
+		case "web_search", "google_search", "web_search_20250305":
+			out = append(out, AnthropicTool{
+				Type: "web_search_20250305",
+				Name: "web_search",
+			})
 		case "code_interpreter", "code_execution":
 			out = append(out, AnthropicTool{Type: "code_execution_20260120", Name: t.Name, InputSchema: t.Parameters})
 		case "mcp":

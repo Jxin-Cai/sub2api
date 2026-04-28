@@ -26,9 +26,9 @@ type AnthropicRequest struct {
 	StopSeqs          []string               `json:"stop_sequences,omitempty"`
 	Thinking          *AnthropicThinking     `json:"thinking,omitempty"`
 	ToolChoice        json.RawMessage        `json:"tool_choice,omitempty"`
+	Metadata          json.RawMessage        `json:"metadata,omitempty"`
 	OutputConfig      *AnthropicOutputConfig `json:"output_config,omitempty"`
 	ServiceTier       string                 `json:"service_tier,omitempty"`
-	Metadata          json.RawMessage        `json:"metadata,omitempty"`
 }
 
 // AnthropicOutputConfig controls output generation parameters.
@@ -101,6 +101,12 @@ type AnthropicMCPServer struct {
 	Name               string          `json:"name,omitempty"`
 	AuthorizationToken string          `json:"authorization_token,omitempty"`
 	ToolConfiguration  json.RawMessage `json:"tool_configuration,omitempty"`
+}
+
+// AnthropicCacheControl 对应 Anthropic API 的 cache_control 字段。
+type AnthropicCacheControl struct {
+	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
 // AnthropicResponse is the non-streaming response from POST /v1/messages.
