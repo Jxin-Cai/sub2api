@@ -793,6 +793,14 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
+	requireCompact := service.DetectAnthropicCompactIntent(body)
+	if requireCompact {
+		service.SetOpenAICompactOverride(c)
+		if userID := strings.TrimSpace(gjson.GetBytes(body, "metadata.user_id").String()); userID != "" {
+			c.Set(service.OpenAICompactSessionSeedKeyForTest(), userID)
+		}
+	}
+
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
@@ -878,7 +886,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			currentRoutingModel,
 			failedAccountIDs,
 			service.OpenAIUpstreamTransportAny,
-			false,
+			requireCompact,
 		)
 		if err != nil {
 			reqLog.Warn("openai_messages.account_select_failed",
@@ -886,10 +894,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
-				if err != nil {
-					h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable", streamStarted)
+				if errors.Is(err, service.ErrNoAvailableCompactAccounts) {
+					h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "compact_not_supported", "No available OpenAI accounts support /responses/compact", streamStarted)
 					return
 				}
+				h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable", streamStarted)
+				return
 			} else {
 				if lastFailoverErr != nil {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)

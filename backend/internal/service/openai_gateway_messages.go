@@ -50,10 +50,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, fmt.Errorf("convert anthropic to responses: %w", err)
 	}
 
-	// Upstream always uses streaming (upstream may not support sync mode).
-	// The client's original preference determines the response format.
-	responsesReq.Stream = true
-	isStream := true
+	isCompactRequest := isOpenAIResponsesCompactPath(c)
+	isStream := !isCompactRequest
+	responsesReq.Stream = isStream
 
 	// 2b. Handle BetaFastMode → service_tier: "priority"
 	if containsBetaToken(c.GetHeader("anthropic-beta"), claude.BetaFastMode) {
@@ -85,7 +84,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
 		}
-		codexResult := applyCodexOAuthTransform(reqBody, false, false)
+		codexResult := applyCodexOAuthTransform(reqBody, false, isCompactRequest)
 		forcedTemplateText := ""
 		if s.cfg != nil {
 			forcedTemplateText = s.cfg.Gateway.ForcedCodexInstructionsTemplate
@@ -112,12 +111,22 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		} else if promptCacheKey != "" {
 			reqBody["prompt_cache_key"] = promptCacheKey
 		}
-		// OAuth codex transform forces stream=true upstream, so always use
-		// the streaming response handler regardless of what the client asked.
-		isStream = true
+		if !isCompactRequest {
+			isStream = true
+		}
 		responsesBody, err = json.Marshal(reqBody)
 		if err != nil {
 			return nil, fmt.Errorf("remarshal after codex transform: %w", err)
+		}
+	}
+
+	if isCompactRequest {
+		normalizedCompact, normalized, compactErr := normalizeOpenAICompactRequestBody(responsesBody)
+		if compactErr != nil {
+			return nil, fmt.Errorf("normalize compact body: %w", compactErr)
+		}
+		if normalized {
+			responsesBody = normalizedCompact
 		}
 	}
 
@@ -126,7 +135,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// upstreams using the Responses API can derive a stable session identifier
 	// from prompt_cache_key. This makes our Anthropic /v1/messages compatibility
 	// path behave more like a native Responses client.
-	if account.Type == AccountTypeAPIKey {
+	if account.Type == AccountTypeAPIKey && !isCompactRequest {
 		if trimmedKey := strings.TrimSpace(promptCacheKey); trimmedKey != "" {
 			var reqBody map[string]any
 			if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
@@ -269,10 +278,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	defer func() { _ = resp.Body.Close() }()
 
 	// 9. Handle normal response
-	// Upstream is always streaming; choose response format based on client preference.
 	var result *OpenAIForwardResult
 	var handleErr error
-	if clientStream {
+	if isCompactRequest {
+		result, handleErr = s.handleAnthropicCompactResponse(resp, c, originalModel, billingModel, upstreamModel, startTime)
+	} else if clientStream {
 		result, handleErr = s.handleAnthropicStreamingResponse(resp, c, originalModel, billingModel, upstreamModel, startTime)
 	} else {
 		// Client wants JSON: buffer the streaming response and assemble a JSON reply.
@@ -309,6 +319,57 @@ func (s *OpenAIGatewayService) handleAnthropicErrorResponse(
 	account *Account,
 ) (*OpenAIForwardResult, error) {
 	return s.handleCompatErrorResponse(resp, c, account, writeAnthropicError)
+}
+
+func (s *OpenAIGatewayService) handleAnthropicCompactResponse(
+	resp *http.Response,
+	c *gin.Context,
+	originalModel string,
+	billingModel string,
+	upstreamModel string,
+	startTime time.Time,
+) (*OpenAIForwardResult, error) {
+	requestID := resp.Header.Get("x-request-id")
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		writeAnthropicError(c, http.StatusBadGateway, "api_error", "Failed to read compact response")
+		return nil, fmt.Errorf("read compact response: %w", err)
+	}
+
+	var responsesResp apicompat.ResponsesResponse
+	if err := json.Unmarshal(respBody, &responsesResp); err != nil {
+		writeAnthropicError(c, http.StatusBadGateway, "api_error", "Failed to parse compact response")
+		return nil, fmt.Errorf("parse compact response: %w", err)
+	}
+
+	var usage OpenAIUsage
+	if responsesResp.Usage != nil {
+		usage = OpenAIUsage{
+			InputTokens:  responsesResp.Usage.InputTokens,
+			OutputTokens: responsesResp.Usage.OutputTokens,
+		}
+		if responsesResp.Usage.InputTokensDetails != nil {
+			usage.CacheReadInputTokens = responsesResp.Usage.InputTokensDetails.CachedTokens
+		}
+	}
+
+	anthropicResp := apicompat.ResponsesToAnthropic(&responsesResp, originalModel)
+
+	if s.responseHeaderFilter != nil {
+		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	}
+	c.JSON(http.StatusOK, anthropicResp)
+
+	return &OpenAIForwardResult{
+		RequestID:     requestID,
+		Usage:         usage,
+		Model:         originalModel,
+		BillingModel:  billingModel,
+		UpstreamModel: upstreamModel,
+		Stream:        false,
+		Duration:      time.Since(startTime),
+	}, nil
 }
 
 // handleAnthropicBufferedStreamingResponse reads all Responses SSE events from

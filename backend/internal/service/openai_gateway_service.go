@@ -54,6 +54,7 @@ const (
 	openAIWSRetryBackoffMaxDefault     = 2 * time.Second
 	openAIWSRetryJitterRatioDefault    = 0.2
 	openAICompactSessionSeedKey        = "openai_compact_session_seed"
+	openAICompactOverrideKey           = "openai_compact_override"
 	codexCLIVersion                    = "0.125.0"
 	// Codex 限额快照仅用于后台展示/诊断，不需要每个成功请求都立即落库。
 	openAICodexSnapshotPersistMinInterval = 30 * time.Second
@@ -5156,8 +5157,44 @@ func NormalizeOpenAICompactRequestBodyForTest(body []byte) ([]byte, bool, error)
 }
 
 func isOpenAIResponsesCompactPath(c *gin.Context) bool {
+	if c != nil {
+		if _, ok := c.Get(openAICompactOverrideKey); ok {
+			return true
+		}
+	}
 	suffix := strings.TrimSpace(openAIResponsesRequestPathSuffix(c))
 	return suffix == "/compact" || strings.HasPrefix(suffix, "/compact/")
+}
+
+func SetOpenAICompactOverride(c *gin.Context) {
+	if c != nil {
+		c.Set(openAICompactOverrideKey, true)
+	}
+}
+
+func DetectAnthropicCompactIntent(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	cm := gjson.GetBytes(body, "context_management")
+	if !cm.Exists() {
+		return false
+	}
+	checkEdits := func(edits gjson.Result) bool {
+		if !edits.IsArray() {
+			return false
+		}
+		for _, edit := range edits.Array() {
+			if strings.TrimSpace(edit.Get("type").String()) == "compact_20260112" {
+				return true
+			}
+		}
+		return false
+	}
+	if cm.IsArray() {
+		return checkEdits(cm)
+	}
+	return checkEdits(cm.Get("edits"))
 }
 
 func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
@@ -5217,6 +5254,11 @@ func openAIResponsesRetrieveStreams(c *gin.Context) bool {
 }
 
 func openAIResponsesRequestPathSuffix(c *gin.Context) string {
+	if c != nil {
+		if _, ok := c.Get(openAICompactOverrideKey); ok {
+			return "/compact"
+		}
+	}
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return ""
 	}

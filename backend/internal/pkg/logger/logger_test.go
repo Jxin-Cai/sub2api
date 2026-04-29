@@ -137,6 +137,82 @@ func TestInit_FileOutputFailureDowngrade(t *testing.T) {
 	}
 }
 
+func TestInit_ConsoleErrorLogsUseRedColorWithoutColoringFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "logger-console-color-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	logPath := filepath.Join(tmpDir, "logs", "sub2api.log")
+
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	os.Stdout = stdoutW
+	os.Stderr = stderrW
+	t.Cleanup(func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+		_ = stdoutR.Close()
+		_ = stderrR.Close()
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
+	})
+
+	if err := Init(InitOptions{
+		Level:       "debug",
+		Format:      "console",
+		ServiceName: "sub2api",
+		Environment: "test",
+		Output: OutputOptions{
+			ToStdout: true,
+			ToFile:   true,
+			FilePath: logPath,
+		},
+		Rotation: RotationOptions{
+			MaxSizeMB:  10,
+			MaxBackups: 1,
+			MaxAgeDays: 1,
+		},
+		Sampling: SamplingOptions{Enabled: false},
+	}); err != nil {
+		t.Fatalf("Init() error: %v", err)
+	}
+
+	L().Error("console-error-color-check")
+
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
+	_, _ = io.ReadAll(stdoutR)
+	stderrBytes, _ := io.ReadAll(stderrR)
+	stderrText := string(stderrBytes)
+	if !strings.Contains(stderrText, "\x1b[31mERROR\x1b[0m") {
+		t.Fatalf("stderr missing red error level: %q", stderrText)
+	}
+	if !strings.Contains(stderrText, "console-error-color-check") {
+		t.Fatalf("stderr missing error message: %q", stderrText)
+	}
+
+	fileBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	fileText := string(fileBytes)
+	if strings.Contains(fileText, "\x1b[") {
+		t.Fatalf("file log should not contain ansi color codes: %q", fileText)
+	}
+	if !strings.Contains(fileText, "console-error-color-check") {
+		t.Fatalf("file missing error log: %q", fileText)
+	}
+}
+
 func TestInit_CallerShouldPointToCallsite(t *testing.T) {
 	origStdout := os.Stdout
 	origStderr := os.Stderr

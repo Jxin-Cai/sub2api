@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -125,6 +127,10 @@ func (p *OpenAITokenProvider) ensureMetrics() {
 	}
 }
 
+func isOpenAITokenCacheMiss(err error) bool {
+	return errors.Is(err, redis.Nil)
+}
+
 // GetAccessToken returns a valid access_token.
 func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Account) (string, error) {
 	p.ensureMetrics()
@@ -142,7 +148,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 		if token, err := p.tokenCache.GetAccessToken(ctx, cacheKey); err == nil && strings.TrimSpace(token) != "" {
 			slog.Debug("openai_token_cache_hit", "account_id", account.ID)
 			return token, nil
-		} else if err != nil {
+		} else if err != nil && !isOpenAITokenCacheMiss(err) {
 			slog.Warn("openai_token_cache_get_failed", "account_id", account.ID, "error", err)
 		}
 	}

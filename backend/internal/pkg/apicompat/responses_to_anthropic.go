@@ -715,6 +715,23 @@ func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEven
 	if !ok {
 		return nil
 	}
+	args := evt.Arguments
+	if args == "" {
+		args = state.CurrentToolArgs
+	}
+	if state.CurrentBlockType == "tool_use" && state.CurrentToolName == "Read" && args != "" {
+		state.BlockHasDelta[blockIdx] = true
+		events := []AnthropicStreamEvent{{
+			Type:  "content_block_delta",
+			Index: &blockIdx,
+			Delta: &AnthropicDelta{
+				Type:        "input_json_delta",
+				PartialJSON: string(sanitizeAnthropicToolUseInput(state.CurrentToolName, args)),
+			},
+		}}
+		events = append(events, closeCurrentBlock(state)...)
+		return events
+	}
 	if evt.Arguments != "" && !state.BlockHasDelta[blockIdx] {
 		state.BlockHasDelta[blockIdx] = true
 		return []AnthropicStreamEvent{{

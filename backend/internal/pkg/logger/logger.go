@@ -242,27 +242,6 @@ func buildLogger(options InitOptions) (*zap.Logger, zap.AtomicLevel, error) {
 	level, _ := parseLevel(options.Level)
 	atomic := zap.NewAtomicLevelAt(level)
 
-	encoderCfg := zapcore.EncoderConfig{
-		TimeKey:        "time",
-		LevelKey:       "level",
-		NameKey:        "logger",
-		CallerKey:      "caller",
-		MessageKey:     "msg",
-		StacktraceKey:  "stacktrace",
-		LineEnding:     zapcore.DefaultLineEnding,
-		EncodeLevel:    zapcore.CapitalLevelEncoder,
-		EncodeTime:     zapcore.ISO8601TimeEncoder,
-		EncodeDuration: zapcore.MillisDurationEncoder,
-		EncodeCaller:   zapcore.ShortCallerEncoder,
-	}
-
-	var enc zapcore.Encoder
-	if options.Format == "console" {
-		enc = zapcore.NewConsoleEncoder(encoderCfg)
-	} else {
-		enc = zapcore.NewJSONEncoder(encoderCfg)
-	}
-
 	sinkCore := newSinkCore()
 	cores := make([]zapcore.Core, 0, 3)
 
@@ -273,12 +252,15 @@ func buildLogger(options InitOptions) (*zap.Logger, zap.AtomicLevel, error) {
 		errPriority := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
 			return lvl >= atomic.Level() && lvl >= zapcore.WarnLevel
 		})
-		cores = append(cores, zapcore.NewCore(enc, zapcore.Lock(os.Stdout), infoPriority))
-		cores = append(cores, zapcore.NewCore(enc, zapcore.Lock(os.Stderr), errPriority))
+		stdoutEncoder := newEncoder(options.Format, false)
+		stderrEncoder := newEncoder(options.Format, true)
+		cores = append(cores, zapcore.NewCore(stdoutEncoder, zapcore.Lock(os.Stdout), infoPriority))
+		cores = append(cores, zapcore.NewCore(stderrEncoder, zapcore.Lock(os.Stderr), errPriority))
 	}
 
 	if options.Output.ToFile {
-		fileCore, filePath, fileErr := buildFileCore(enc, atomic, options)
+		fileEncoder := newEncoder(options.Format, false)
+		fileCore, filePath, fileErr := buildFileCore(fileEncoder, atomic, options)
 		if fileErr != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "time=%s level=WARN msg=\"日志文件输出初始化失败，降级为仅标准输出\" path=%s err=%v\n",
 				time.Now().Format(time.RFC3339Nano),
@@ -291,7 +273,8 @@ func buildLogger(options InitOptions) (*zap.Logger, zap.AtomicLevel, error) {
 	}
 
 	if len(cores) == 0 {
-		cores = append(cores, zapcore.NewCore(enc, zapcore.Lock(os.Stdout), atomic))
+		fallbackEncoder := newEncoder(options.Format, false)
+		cores = append(cores, zapcore.NewCore(fallbackEncoder, zapcore.Lock(os.Stdout), atomic))
 	}
 
 	core := zapcore.NewTee(cores...)
@@ -314,6 +297,39 @@ func buildLogger(options InitOptions) (*zap.Logger, zap.AtomicLevel, error) {
 		zap.String("env", options.Environment),
 	)
 	return logger, atomic, nil
+}
+
+func newEncoder(format string, colorizeErrors bool) zapcore.Encoder {
+	encoderCfg := zapcore.EncoderConfig{
+		TimeKey:        "time",
+		LevelKey:       "level",
+		NameKey:        "logger",
+		CallerKey:      "caller",
+		MessageKey:     "msg",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    zapcore.CapitalLevelEncoder,
+		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeDuration: zapcore.MillisDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
+	}
+
+	if format == "console" && colorizeErrors {
+		encoderCfg.EncodeLevel = errorColorLevelEncoder
+	}
+	if format == "console" {
+		return zapcore.NewConsoleEncoder(encoderCfg)
+	}
+	return zapcore.NewJSONEncoder(encoderCfg)
+}
+
+func errorColorLevelEncoder(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+	label := strings.ToUpper(level.String())
+	if level >= zapcore.ErrorLevel {
+		enc.AppendString("\x1b[31m" + label + "\x1b[0m")
+		return
+	}
+	enc.AppendString(label)
 }
 
 func buildFileCore(enc zapcore.Encoder, atomic zap.AtomicLevel, options InitOptions) (zapcore.Core, string, error) {
