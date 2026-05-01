@@ -149,6 +149,7 @@ services:
         condition: service_healthy
     networks:
       - sub2api-network
+      - shared-backend
     healthcheck:
       test:
         [
@@ -256,3 +257,6 @@ volumes:
 networks:
   sub2api-network:
     driver: bridge
+  shared-backend:
+    name: shared-backend-network
+    external: true
