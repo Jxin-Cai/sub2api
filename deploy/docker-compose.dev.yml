@@ -47,6 +47,7 @@ services:
         condition: service_healthy
     networks:
       - sub2api-network
+      - shared-backend
     healthcheck:
       test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
       interval: 30s
@@ -103,3 +104,6 @@ services:
 networks:
   sub2api-network:
     driver: bridge
+  shared-backend:
+    name: shared-backend-network
+    external: true
