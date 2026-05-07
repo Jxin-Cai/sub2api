@@ -19,16 +19,22 @@ import (
 // Profile contains TLS fingerprint configuration.
 // All slice fields use built-in defaults when empty.
 type Profile struct {
-	Name                string // Profile name for identification
-	CipherSuites        []uint16
-	Curves              []uint16
+	Name         string // Profile name for identification
+	CipherSuites []uint16
+	Curves       []uint16 // Curves used for key exchange (must be utls-supported)
+	RawCurves    []uint16 // If set, overrides the supported_groups extension bytes verbatim.
+	// This allows advertising BoringSSL-specific curve IDs (e.g. 4588/4587/4589)
+	// that utls cannot perform key exchange with, matching real client fingerprints.
+	// Curves is still used for actual key exchange.
 	PointFormats        []uint16
 	EnableGREASE        bool
 	SignatureAlgorithms []uint16 // Empty uses defaultSignatureAlgorithms
-	ALPNProtocols       []string // Empty uses ["http/1.1"]
+	ALPNProtocols       []string // Empty uses ["http/1.1"]; set NoALPN=true to omit the extension
+	NoALPN              bool     // If true, omit ALPN extension entirely (do not send extension 16)
 	SupportedVersions   []uint16 // Empty uses [TLS1.3, TLS1.2]
 	KeyShareGroups      []uint16 // Empty uses [X25519]
-	PSKModes            []uint16 // Empty uses [psk_dhe_ke]
+	PSKModes            []uint16 // Empty uses [psk_dhe_ke]; set NoPSKModes=true to omit extension 45
+	NoPSKModes          bool     // If true, omit psk_key_exchange_modes extension entirely
 	Extensions          []uint16 // Extension type IDs in order; empty uses default Node.js 24.x order
 }
 
@@ -56,6 +62,70 @@ type SOCKS5ProxyDialer struct {
 // Captured via tls-fingerprint-web capture server
 // JA3 Hash: 44f88fca027f27bab4bb08d4af15f23e
 // JA4:      t13d1714h1_5b57614c22b0_7baf387fc6ff
+
+// AntigravityRealProfile is the TLS fingerprint captured from the real
+// Antigravity IDE plugin (v1.22.2, darwin/arm64) via DNS-hijack capture.
+//
+// JA3 Hash: 9b7dcdf3f997f1fb7b4409c94cb7ef36
+// JA4:      t13131100_a0ca18950718_757b3b1e4154
+//
+// Key differences from the Node.js 24.x default:
+//   - No ALPN (empty) — antigravity does not advertise http/1.1
+//   - No GREASE values in cipher suites or extensions
+//   - No ECH / session_ticket / SCT / psk_key_exchange_modes / key_share extensions
+//   - Fewer cipher suites (13 vs 17)
+//   - Different curve set: includes X25519MLKEM768 variants (4588/4587/4589)
+//   - Extension order: SNI, ec_point_formats, extended_master_secret,
+//     renegotiation_info, status_request, supported_groups,
+//     signature_algorithms, signature_algorithms_cert, supported_versions
+var AntigravityRealProfile = &Profile{
+	Name: "antigravity-real-v1.22.2-darwin-arm64",
+	// 13 cipher suites exactly as observed (decimal → hex):
+	// 49195=0xc02b 49199=0xc02f 49196=0xc02c 49200=0xc030
+	// 52393=0xcca9 52392=0xcca8
+	// 49161=0xc009 49171=0xc013 49162=0xc00a 49172=0xc014
+	// 4865=0x1301  4866=0x1302  4867=0x1303
+	CipherSuites: []uint16{
+		0xc02b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+		0xc02f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+		0xc02c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+		0xc030, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+		0xcca9, // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+		0xcca8, // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+		0xc009, // TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
+		0xc013, // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
+		0xc00a, // TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA
+		0xc014, // TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+		0x1301, // TLS_AES_128_GCM_SHA256
+		0x1302, // TLS_AES_256_GCM_SHA384
+		0x1303, // TLS_CHACHA20_POLY1305_SHA256
+	},
+	// RawCurves: all 7 curves as observed in the real ClientHello (for supported_groups extension).
+	// 4588=X25519MLKEM768, 4587=SecP256r1MLKEM768, 4589=X25519MLKEM768Draft00 (BoringSSL-specific)
+	// 29=X25519, 23=P-256, 24=P-384, 25=P-521
+	// These are serialized verbatim so the JA3 Curves field matches exactly.
+	RawCurves: []uint16{4588, 4587, 4589, 29, 23, 24, 25},
+	// Curves: only utls-supported curves used for actual key exchange
+	Curves: []uint16{29, 23, 24, 25},
+	// Point formats: uncompressed only
+	PointFormats: []uint16{0},
+	// No GREASE
+	EnableGREASE: false,
+	// No ALPN — omit extension 16 entirely
+	NoALPN: true,
+	// Extensions observed in order: [0 11 65281 23 18 5 10 13 50 43 51]
+	// 0=SNI, 11=ec_point_formats, 65281=renegotiation_info, 23=extended_master_secret,
+	// 18=SCT, 5=status_request, 10=supported_groups, 13=signature_algorithms,
+	// 50=signature_algorithms_cert, 43=supported_versions, 51=key_share
+	// Note: extension 45 (psk_key_exchange_modes) is NOT present
+	Extensions: []uint16{0, 11, 65281, 23, 18, 5, 10, 13, 50, 43, 51},
+	// TLS 1.3 + 1.2
+	SupportedVersions: []uint16{0x0304, 0x0303},
+	// Key share: X25519 only (matches simpler profile)
+	KeyShareGroups: []uint16{29},
+	// No PSK modes (extension 45 not present in observed fingerprint)
+	NoPSKModes: true,
+}
 var (
 	// defaultCipherSuites contains the 17 cipher suites from Node.js 24.x
 	// Order is critical for JA3 fingerprint matching
@@ -359,7 +429,8 @@ func buildClientHelloSpecFromProfile(profile *Profile) *utls.ClientHelloSpec {
 	}
 
 	alpnProtocols := []string{"http/1.1"}
-	if profile != nil && len(profile.ALPNProtocols) > 0 {
+	noALPN := profile != nil && profile.NoALPN
+	if !noALPN && profile != nil && len(profile.ALPNProtocols) > 0 {
 		alpnProtocols = profile.ALPNProtocols
 	}
 
@@ -373,8 +444,9 @@ func buildClientHelloSpecFromProfile(profile *Profile) *utls.ClientHelloSpec {
 		keyShareGroups = toUTLSCurves(profile.KeyShareGroups)
 	}
 
+	noPSKModes := profile != nil && profile.NoPSKModes
 	pskModes := []uint16{uint16(utls.PskModeDHE)}
-	if profile != nil && len(profile.PSKModes) > 0 {
+	if !noPSKModes && profile != nil && len(profile.PSKModes) > 0 {
 		pskModes = profile.PSKModes
 	}
 
@@ -407,13 +479,33 @@ func buildClientHelloSpecFromProfile(profile *Profile) *utls.ClientHelloSpec {
 		case 5: // status_request (OCSP)
 			extensions = append(extensions, &utls.StatusRequestExtension{})
 		case 10: // supported_groups
-			extensions = append(extensions, &utls.SupportedCurvesExtension{Curves: curves})
+			var rawCurves []uint16
+			if profile != nil {
+				rawCurves = profile.RawCurves
+			}
+			if len(rawCurves) > 0 {
+				// Serialize raw curve IDs verbatim — allows advertising BoringSSL-specific
+				// curve IDs (e.g. X25519MLKEM768=4588) that utls cannot do key exchange with.
+				// Format: 2-byte list length + 2 bytes per curve ID (big-endian)
+				data := make([]byte, 2+len(rawCurves)*2)
+				data[0] = byte(len(rawCurves) * 2 >> 8)
+				data[1] = byte(len(rawCurves) * 2)
+				for i, c := range rawCurves {
+					data[2+i*2] = byte(c >> 8)
+					data[2+i*2+1] = byte(c)
+				}
+				extensions = append(extensions, &utls.GenericExtension{Id: 10, Data: data})
+			} else {
+				extensions = append(extensions, &utls.SupportedCurvesExtension{Curves: curves})
+			}
 		case 11: // ec_point_formats
 			extensions = append(extensions, &utls.SupportedPointsExtension{SupportedPoints: toUint8s(pointFormats)})
 		case 13: // signature_algorithms
 			extensions = append(extensions, &utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: signatureAlgorithms})
 		case 16: // alpn
-			extensions = append(extensions, &utls.ALPNExtension{AlpnProtocols: alpnProtocols})
+			if !noALPN {
+				extensions = append(extensions, &utls.ALPNExtension{AlpnProtocols: alpnProtocols})
+			}
 		case 18: // signed_certificate_timestamp
 			extensions = append(extensions, &utls.SCTExtension{})
 		case 23: // extended_master_secret
@@ -423,7 +515,9 @@ func buildClientHelloSpecFromProfile(profile *Profile) *utls.ClientHelloSpec {
 		case 43: // supported_versions
 			extensions = append(extensions, &utls.SupportedVersionsExtension{Versions: supportedVersions})
 		case 45: // psk_key_exchange_modes
-			extensions = append(extensions, &utls.PSKKeyExchangeModesExtension{Modes: toUint8s(pskModes)})
+			if !noPSKModes {
+				extensions = append(extensions, &utls.PSKKeyExchangeModesExtension{Modes: toUint8s(pskModes)})
+			}
 		case 50: // signature_algorithms_cert
 			extensions = append(extensions, &utls.SignatureAlgorithmsCertExtension{SupportedSignatureAlgorithms: signatureAlgorithms})
 		case 51: // key_share
