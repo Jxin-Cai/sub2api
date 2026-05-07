@@ -1842,8 +1842,8 @@ func TestOpenAIGatewayService_ForwardAsAnthropicRetriesStaleReasoningItemOnce(t 
 	require.Equal(t, "resp_messages_stale_retry_ok", gjson.Get(rec.Body.String(), "id").String())
 	require.Equal(t, 2, upstream.callCount)
 	require.Len(t, upstream.bodies, 2)
-	require.Equal(t, "reasoning", gjson.GetBytes(upstream.bodies[0], "input.1.type").String())
-	require.Equal(t, "user", gjson.GetBytes(upstream.bodies[1], "input.1.role").String())
+	require.Equal(t, "reasoning", gjson.GetBytes(upstream.bodies[0], "input.2.type").String())
+	require.Equal(t, "user", gjson.GetBytes(upstream.bodies[1], "input.2.role").String())
 }
 
 func TestOpenAIGatewayService_ForwardAsAnthropicRetriesInvalidEncryptedContentOnce(t *testing.T) {
@@ -1902,9 +1902,9 @@ func TestOpenAIGatewayService_ForwardAsAnthropicRetriesInvalidEncryptedContentOn
 	require.Equal(t, "resp_messages_retry_ok", gjson.Get(rec.Body.String(), "id").String())
 	require.Equal(t, 2, upstream.callCount)
 	require.Len(t, upstream.bodies, 2)
-	require.Equal(t, "reasoning", gjson.GetBytes(upstream.bodies[0], "input.1.type").String())
-	require.True(t, gjson.GetBytes(upstream.bodies[0], "input.1.encrypted_content").Exists())
-	require.Equal(t, "user", gjson.GetBytes(upstream.bodies[1], "input.1.role").String())
+	require.Equal(t, "reasoning", gjson.GetBytes(upstream.bodies[0], "input.2.type").String())
+	require.True(t, gjson.GetBytes(upstream.bodies[0], "input.2.encrypted_content").Exists())
+	require.Equal(t, "user", gjson.GetBytes(upstream.bodies[1], "input.2.role").String())
 }
 
 func TestOpenAIResponsesRequestPathSuffix(t *testing.T) {
@@ -1930,6 +1930,24 @@ func TestOpenAIResponsesRequestPathSuffix(t *testing.T) {
 			require.Equal(t, tt.want, openAIResponsesRequestPathSuffix(c))
 		})
 	}
+}
+
+func TestNormalizeOpenAICompactRequestBodyPreservesCurrentCodexPayloadFields(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":"compact me"}],"instructions":"compact-test","tools":[{"type":"function","name":"shell"}],"parallel_tool_calls":true,"reasoning":{"effort":"high"},"text":{"verbosity":"low"},"previous_response_id":"resp_123","store":true,"stream":true,"prompt_cache_key":"cache_123"}`)
+
+	normalized, changed, err := normalizeOpenAICompactRequestBody(body)
+
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, "gpt-5.5", gjson.GetBytes(normalized, "model").String())
+	require.True(t, gjson.GetBytes(normalized, "tools").Exists())
+	require.True(t, gjson.GetBytes(normalized, "parallel_tool_calls").Bool())
+	require.Equal(t, "high", gjson.GetBytes(normalized, "reasoning.effort").String())
+	require.Equal(t, "low", gjson.GetBytes(normalized, "text.verbosity").String())
+	require.Equal(t, "resp_123", gjson.GetBytes(normalized, "previous_response_id").String())
+	require.False(t, gjson.GetBytes(normalized, "store").Exists())
+	require.False(t, gjson.GetBytes(normalized, "stream").Exists())
+	require.False(t, gjson.GetBytes(normalized, "prompt_cache_key").Exists())
 }
 
 func TestOpenAIBuildUpstreamRequestOpenAIPassthroughPreservesCompactPath(t *testing.T) {
@@ -1969,7 +1987,30 @@ func TestOpenAIBuildUpstreamRequestCompactForcesJSONAcceptForOAuth(t *testing.T)
 	require.NotEmpty(t, req.Header.Get("Session_Id"))
 }
 
-func TestOpenAIBuildUpstreamRequestOpenAIPassthrough_RetrievePreservesMethodPathAndQuery(t *testing.T) {
+func TestOpenAIBuildUpstreamRequestOAuthMessagesBridgeUsesSessionOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.5","prompt_cache_key":"anthropic-metadata-session-1","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"<sub2api-claude-code-todo-guard>"}]},{"type":"message","role":"user","content":"hello"}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("OpenAI-Beta", "responses=experimental")
+	c.Request.Header.Set("originator", "codex_cli_rs")
+
+	svc := &OpenAIGatewayService{}
+	account := &Account{
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"},
+	}
+
+	req, err := svc.buildUpstreamRequest(c.Request.Context(), c, account, body, "token", true, "anthropic-metadata-session-1", false)
+	require.NoError(t, err)
+	require.NotEmpty(t, req.Header.Get("Session_Id"))
+	require.Empty(t, req.Header.Get("Conversation_Id"))
+	require.Empty(t, req.Header.Get("OpenAI-Beta"))
+	require.Empty(t, req.Header.Get("originator"))
+}
+
+func TestOpenAIBuildUpstreamRequestPreservesCompactPathForAPIKeyBaseURL(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)

@@ -53,6 +53,8 @@ type AnthropicMessage struct {
 type AnthropicContentBlock struct {
 	Type string `json:"type"`
 
+	CacheControl *AnthropicCacheControl `json:"cache_control,omitempty"`
+
 	// type=text
 	Text string `json:"text"`
 
@@ -234,13 +236,18 @@ type ResponsesReasoning struct {
 	EncryptedContent string `json:"encrypted_content,omitempty"`
 }
 
+// ResponsesText configures text output options in the Responses API.
+type ResponsesText struct {
+	Verbosity string `json:"verbosity,omitempty"` // "low" | "medium" | "high"
+}
+
 // ResponsesInputItem is one item in the Responses API input array.
 // The Type field determines which other fields are populated.
 type ResponsesInputItem struct {
 	// Common
 	Type string `json:"type,omitempty"` // "" for role-based messages
 
-	// Role-based messages (system/user/assistant)
+	// Role-based messages (developer/system/user/assistant)
 	Role    string          `json:"role,omitempty"`
 	Content json.RawMessage `json:"content,omitempty"` // string or []ResponsesContentPart
 	Phase   string          `json:"phase,omitempty"`
@@ -434,7 +441,7 @@ type ResponsesOutputTokensDetails struct {
 type ResponsesStreamEvent struct {
 	Type string `json:"type"`
 
-	// response.* lifecycle events
+	// response.created / response.completed / response.done / response.failed / response.incomplete
 	Response *ResponsesResponse `json:"response,omitempty"`
 
 	// response.output_item.added / response.output_item.done
