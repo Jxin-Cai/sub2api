@@ -56,10 +56,10 @@ type AnthropicContentBlock struct {
 	CacheControl *AnthropicCacheControl `json:"cache_control,omitempty"`
 
 	// type=text
-	Text string `json:"text"`
+	Text string `json:"text,omitempty"`
 
 	// type=thinking
-	Thinking  string `json:"thinking"`
+	Thinking  string `json:"thinking,omitempty"`
 	Signature string `json:"signature,omitempty"`
 
 	// type=image
