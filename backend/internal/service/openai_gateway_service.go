@@ -3037,6 +3037,12 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 	}
 
+	if IsImageGenerationIntent(openAIResponsesEndpoint, reqModel, body) {
+		if sanitized, ok := sanitizeOpenAIImageToolSizeInBody(body); ok {
+			body = sanitized
+		}
+	}
+
 	logger.LegacyPrintf("service.openai_gateway",
 		"[OpenAI 自动透传] 命中自动透传分支: account=%d name=%s type=%s model=%s stream=%v",
 		account.ID,

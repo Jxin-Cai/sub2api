@@ -669,6 +669,12 @@ func normalizeOpenAIResponsesImageGenerationTools(reqBody map[string]any) bool {
 			delete(toolMap, "compression")
 			modified = true
 		}
+		if sizeVal := strings.TrimSpace(firstNonEmptyString(toolMap["size"])); sizeVal != "" {
+			if isOpenAIImageSizeBelowMinimum(sizeVal) {
+				delete(toolMap, "size")
+				modified = true
+			}
+		}
 	}
 	return modified
 }
@@ -814,6 +820,12 @@ func normalizeOpenAIResponsesImageOnlyModel(reqBody map[string]any) bool {
 					toolMap[key] = value
 				}
 				delete(reqBody, key)
+				modified = true
+			}
+		}
+		if sizeVal := strings.TrimSpace(firstNonEmptyString(toolMap["size"])); sizeVal != "" {
+			if isOpenAIImageSizeBelowMinimum(sizeVal) {
+				delete(toolMap, "size")
 				modified = true
 			}
 		}

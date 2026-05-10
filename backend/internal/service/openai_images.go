@@ -552,8 +552,43 @@ func normalizeOpenAIImageSizeTier(size string) string {
 }
 
 const (
-	openAIImage2KMaxPixels = 2560 * 1440
+	openAIImage2KMaxPixels  = 2560 * 1440
+	openAIImageMinPixels    = 1024 * 1024
 )
+
+func isOpenAIImageSizeBelowMinimum(size string) bool {
+	width, height, ok := parseOpenAIImageSizeDimensions(size)
+	if !ok {
+		return false
+	}
+	return width*height < openAIImageMinPixels
+}
+
+func sanitizeOpenAIImageToolSizeInBody(body []byte) ([]byte, bool) {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body, false
+	}
+	modified := false
+	for i, tool := range tools.Array() {
+		if tool.Get("type").String() != "image_generation" {
+			continue
+		}
+		sizeVal := strings.TrimSpace(tool.Get("size").String())
+		if sizeVal == "" {
+			continue
+		}
+		if isOpenAIImageSizeBelowMinimum(sizeVal) {
+			path := fmt.Sprintf("tools.%d.size", i)
+			next, err := sjson.DeleteBytes(body, path)
+			if err == nil {
+				body = next
+				modified = true
+			}
+		}
+	}
+	return body, modified
+}
 
 func parseOpenAIImageSizeDimensions(size string) (int, int, bool) {
 	trimmed := strings.TrimSpace(size)

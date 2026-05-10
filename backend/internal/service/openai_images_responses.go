@@ -259,6 +259,9 @@ func buildOpenAIImagesResponsesRequest(parsed *OpenAIImagesRequest, toolModel st
 		{path: "style", value: parsed.Style},
 	} {
 		if trimmed := strings.TrimSpace(field.value); trimmed != "" {
+			if field.path == "size" && isOpenAIImageSizeBelowMinimum(trimmed) {
+				continue
+			}
 			tool, _ = sjson.SetBytes(tool, field.path, trimmed)
 		}
 	}
