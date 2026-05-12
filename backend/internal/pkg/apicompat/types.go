@@ -424,7 +424,8 @@ type ResponsesUsage struct {
 
 // ResponsesInputTokensDetails breaks down input token usage.
 type ResponsesInputTokensDetails struct {
-	CachedTokens int `json:"cached_tokens,omitempty"`
+	CachedTokens             int `json:"cached_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // ResponsesOutputTokensDetails breaks down output token usage.

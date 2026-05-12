@@ -4871,6 +4871,7 @@ func (s *OpenAIGatewayService) parseSSEUsageBytes(data []byte, usage *OpenAIUsag
 	usage.InputTokens = int(gjson.GetBytes(data, "response.usage.input_tokens").Int())
 	usage.OutputTokens = int(gjson.GetBytes(data, "response.usage.output_tokens").Int())
 	usage.CacheReadInputTokens = int(gjson.GetBytes(data, "response.usage.input_tokens_details.cached_tokens").Int())
+	usage.CacheCreationInputTokens = int(gjson.GetBytes(data, "response.usage.input_tokens_details.cache_creation_input_tokens").Int())
 	usage.ImageOutputTokens = int(gjson.GetBytes(data, "response.usage.output_tokens_details.image_tokens").Int())
 }
 
@@ -4884,12 +4885,14 @@ func extractOpenAIUsageFromJSONBytes(body []byte) (OpenAIUsage, bool) {
 		"usage.output_tokens",
 		"usage.input_tokens_details.cached_tokens",
 		"usage.output_tokens_details.image_tokens",
+		"usage.input_tokens_details.cache_creation_input_tokens",
 	)
 	return OpenAIUsage{
-		InputTokens:          int(values[0].Int()),
-		OutputTokens:         int(values[1].Int()),
-		CacheReadInputTokens: int(values[2].Int()),
-		ImageOutputTokens:    int(values[3].Int()),
+		InputTokens:              int(values[0].Int()),
+		OutputTokens:             int(values[1].Int()),
+		CacheReadInputTokens:     int(values[2].Int()),
+		ImageOutputTokens:        int(values[3].Int()),
+		CacheCreationInputTokens: int(values[4].Int()),
 	}, true
 }
 

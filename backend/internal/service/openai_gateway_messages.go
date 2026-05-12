@@ -467,10 +467,14 @@ func (s *OpenAIGatewayService) handleAnthropicCompactResponse(
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, anthropicTooLargeError)
 	if err != nil {
-		writeAnthropicError(c, http.StatusBadGateway, "api_error", "Failed to read compact response")
 		return nil, fmt.Errorf("read compact response: %w", err)
+	}
+
+	if isEventStreamResponse(resp.Header) || looksLikeSSEBody(respBody) {
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+		return s.handleAnthropicBufferedStreamingResponse(resp, c, originalModel, billingModel, upstreamModel, startTime)
 	}
 
 	var responsesResp apicompat.ResponsesResponse
@@ -487,6 +491,7 @@ func (s *OpenAIGatewayService) handleAnthropicCompactResponse(
 		}
 		if responsesResp.Usage.InputTokensDetails != nil {
 			usage.CacheReadInputTokens = responsesResp.Usage.InputTokensDetails.CachedTokens
+			usage.CacheCreationInputTokens = responsesResp.Usage.InputTokensDetails.CacheCreationInputTokens
 		}
 	}
 
@@ -1014,6 +1019,15 @@ func copyOpenAIUsageFromResponsesUsage(usage *apicompat.ResponsesUsage) OpenAIUs
 	}
 	if usage.InputTokensDetails != nil {
 		result.CacheReadInputTokens = usage.InputTokensDetails.CachedTokens
+		result.CacheCreationInputTokens = usage.InputTokensDetails.CacheCreationInputTokens
 	}
 	return result
+}
+
+func looksLikeSSEBody(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	return bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:"))
 }
