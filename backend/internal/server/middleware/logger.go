@@ -1,6 +1,9 @@
 package middleware
 
 import (
+	"errors"
+	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -66,7 +69,30 @@ func Logger() gin.HandlerFunc {
 		l.Info("http request completed", zap.Time("completed_at", endTime))
 
 		if len(c.Errors) > 0 {
-			l.Warn("http request contains gin errors", zap.String("errors", c.Errors.String()))
+			var filtered []string
+			for _, e := range c.Errors {
+				if !isClientDisconnect(e.Err) {
+					filtered = append(filtered, e.Error())
+				}
+			}
+			if len(filtered) > 0 {
+				l.Warn("http request contains gin errors", zap.String("errors", strings.Join(filtered, "\n")))
+			}
 		}
 	}
+}
+
+func isClientDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		var syscallErr *os.SyscallError
+		if errors.As(opErr.Err, &syscallErr) {
+			msg := strings.ToLower(syscallErr.Error())
+			return strings.Contains(msg, "broken pipe") || strings.Contains(msg, "connection reset by peer")
+		}
+	}
+	return false
 }
