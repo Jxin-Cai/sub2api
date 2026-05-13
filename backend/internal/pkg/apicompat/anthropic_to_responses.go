@@ -68,7 +68,8 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 	}
 
 	if req.OutputConfig != nil && len(req.OutputConfig.Format) > 0 {
-		out.Text = json.RawMessage(`{"format":` + string(req.OutputConfig.Format) + `}`)
+		format := ensureFormatName(req.OutputConfig.Format)
+		out.Text = json.RawMessage(`{"format":` + string(format) + `}`)
 	}
 
 	// Determine reasoning effort: only output_config.effort controls the
@@ -97,6 +98,28 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 	}
 
 	return out, nil
+}
+
+// ensureFormatName ensures that a json_schema format object has the required
+// "name" field. OpenAI's Responses API requires text.format.name when
+// text.format.type is "json_schema".
+func ensureFormatName(raw json.RawMessage) json.RawMessage {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw
+	}
+	if string(m["type"]) != `"json_schema"` {
+		return raw
+	}
+	if _, ok := m["name"]; ok {
+		return raw
+	}
+	m["name"] = json.RawMessage(`"json_response"`)
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // convertAnthropicToolChoiceToResponses maps Anthropic tool_choice to Responses format.

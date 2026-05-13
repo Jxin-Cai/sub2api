@@ -1349,6 +1349,21 @@ func TestAnthropicToResponses_OutputConfigFormat(t *testing.T) {
 	assert.Equal(t, "medium", resp.Reasoning.Effort)
 }
 
+func TestAnthropicToResponses_OutputConfigFormatJsonSchemaMissingName(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "gpt-5.3-codex",
+		MaxTokens: 1024,
+		Messages:  []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+		OutputConfig: &AnthropicOutputConfig{
+			Format: json.RawMessage(`{"type":"json_schema","schema":{"type":"object"}}`),
+		},
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"format":{"type":"json_schema","name":"json_response","schema":{"type":"object"}}}`, string(resp.Text))
+}
+
 // ---------------------------------------------------------------------------
 // tool_choice conversion tests
 // ---------------------------------------------------------------------------
