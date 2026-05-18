@@ -1350,18 +1350,48 @@ func TestAnthropicToResponses_OutputConfigFormat(t *testing.T) {
 }
 
 func TestAnthropicToResponses_OutputConfigFormatJsonSchemaMissingName(t *testing.T) {
-	req := &AnthropicRequest{
-		Model:     "gpt-5.3-codex",
-		MaxTokens: 1024,
-		Messages:  []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
-		OutputConfig: &AnthropicOutputConfig{
-			Format: json.RawMessage(`{"type":"json_schema","schema":{"type":"object"}}`),
+	tests := []struct {
+		name   string
+		format json.RawMessage
+	}{
+		{
+			name:   "missing",
+			format: json.RawMessage(`{"type":"json_schema","schema":{"type":"object"}}`),
+		},
+		{
+			name:   "empty string",
+			format: json.RawMessage(`{"type":"json_schema","name":"","schema":{"type":"object"}}`),
+		},
+		{
+			name:   "null",
+			format: json.RawMessage(`{"type":"json_schema","name":null,"schema":{"type":"object"}}`),
+		},
+		{
+			name:   "blank string",
+			format: json.RawMessage(`{"type":"json_schema","name":"   ","schema":{"type":"object"}}`),
+		},
+		{
+			name:   "non string",
+			format: json.RawMessage(`{"type":"json_schema","name":123,"schema":{"type":"object"}}`),
 		},
 	}
 
-	resp, err := AnthropicToResponses(req)
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"format":{"type":"json_schema","name":"json_response","schema":{"type":"object"}}}`, string(resp.Text))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &AnthropicRequest{
+				Model:     "gpt-5.3-codex",
+				MaxTokens: 1024,
+				Messages:  []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+				OutputConfig: &AnthropicOutputConfig{
+					Format: tt.format,
+				},
+			}
+
+			resp, err := AnthropicToResponses(req)
+			require.NoError(t, err)
+			assert.JSONEq(t, `{"format":{"type":"json_schema","name":"json_response","schema":{"type":"object"}}}`, string(resp.Text))
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

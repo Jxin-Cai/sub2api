@@ -111,8 +111,11 @@ func ensureFormatName(raw json.RawMessage) json.RawMessage {
 	if string(m["type"]) != `"json_schema"` {
 		return raw
 	}
-	if _, ok := m["name"]; ok {
-		return raw
+	if rawName, ok := m["name"]; ok {
+		var name string
+		if err := json.Unmarshal(rawName, &name); err == nil && strings.TrimSpace(name) != "" {
+			return raw
+		}
 	}
 	m["name"] = json.RawMessage(`"json_response"`)
 	out, err := json.Marshal(m)
