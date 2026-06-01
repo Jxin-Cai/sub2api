@@ -577,7 +577,7 @@ func (h *OpenAIGatewayHandler) handleResponsesRetrieve(
 		zap.Bool("stream", stream),
 	)
 
-	setOpsRequestContext(c, "", stream, nil)
+	setOpsRequestContext(c, "", stream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(stream, false)))
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
@@ -592,7 +592,7 @@ func (h *OpenAIGatewayHandler) handleResponsesRetrieve(
 		defer userReleaseFunc()
 	}
 
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription); err != nil {
+	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
 		reqLog.Info("openai.billing_eligibility_check_failed", zap.Error(err))
 		status, code, message, _ := billingErrorDetails(err)
 		h.handleStreamingAwareError(c, status, code, message, streamStarted)

@@ -33,6 +33,8 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 		Stream:       true, // upstream always streams
 		Include:      []string{"reasoning.encrypted_content"},
 		ServiceTier:  req.ServiceTier,
+		Metadata:     req.Metadata,
+		TopLogprobs:  req.TopLogprobs,
 	}
 
 	// Reasoning models (gpt-5.x) do not accept sampling parameters.
@@ -44,6 +46,15 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 
 	storeFalse := false
 	out.Store = &storeFalse
+	if req.Store != nil {
+		out.Store = req.Store
+	}
+	if len(req.ResponseFormat) > 0 {
+		out.Text = json.RawMessage(`{"format":` + string(req.ResponseFormat) + `}`)
+	}
+	if req.Logprobs != nil && *req.Logprobs {
+		out.Include = appendUniqueString(out.Include, "message.output_text.logprobs")
+	}
 
 	// max_tokens / max_completion_tokens → max_output_tokens, prefer max_completion_tokens
 	maxTokens := 0
@@ -72,6 +83,9 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 	// tools[] and legacy functions[] → ResponsesTool[]
 	if len(req.Tools) > 0 || len(req.Functions) > 0 {
 		out.Tools = convertChatToolsToResponses(req.Tools, req.Functions)
+	}
+	if len(req.WebSearchOptions) > 0 {
+		out.Tools = append(out.Tools, chatWebSearchOptionsToResponsesTool(req.WebSearchOptions))
 	}
 
 	// tool_choice: already compatible format — pass through directly.
@@ -463,4 +477,25 @@ func convertChatFunctionCallToToolChoice(raw json.RawMessage) (json.RawMessage, 
 		"type": "function",
 		"name": obj.Name,
 	})
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func chatWebSearchOptionsToResponsesTool(raw json.RawMessage) ResponsesTool {
+	tool := ResponsesTool{Type: "web_search"}
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &options); err != nil {
+		return tool
+	}
+	if location := options["user_location"]; len(location) > 0 && string(bytesTrimSpace(location)) != "null" {
+		tool.UserLocation = location
+	}
+	return tool
 }

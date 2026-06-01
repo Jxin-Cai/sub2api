@@ -443,7 +443,7 @@ func (s *defaultOpenAIAccountScheduler) selectByModelPriority(
 		if needsUpstreamCheck && s.service.isUpstreamModelRestrictedByChannel(ctx, *req.GroupID, account, req.RequestedModel, req.RequireCompact) {
 			continue
 		}
-		account = s.service.recheckSelectedOpenAIAccountFromDB(ctx, account, req.RequestedModel, req.RequireCompact)
+		account = s.service.recheckSelectedOpenAIAccountFromDB(ctx, account, req.RequestedModel, req.RequireCompact, req.RequiredCapability)
 		if account == nil {
 			continue
 		}

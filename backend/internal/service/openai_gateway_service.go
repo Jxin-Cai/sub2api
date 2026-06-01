@@ -1613,7 +1613,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 
 	// 3. 优先尝试模型优先规则
 	// Prefer model-priority accounts before regular selection
-	selected := s.selectPreferredAccountByModelPriority(ctx, groupID, accounts, requestedModel, excludedIDs, requireCompact)
+	selected := s.selectPreferredAccountByModelPriority(ctx, groupID, accounts, requestedModel, excludedIDs, requireCompact, requiredCapability)
 	compactBlocked := false
 	if selected == nil {
 		// 4. 按优先级 + LRU 选择最佳账号
@@ -1768,7 +1768,7 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 	return selected, compactBlocked
 }
 
-func (s *OpenAIGatewayService) selectPreferredAccountByModelPriority(ctx context.Context, groupID *int64, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool) *Account {
+func (s *OpenAIGatewayService) selectPreferredAccountByModelPriority(ctx context.Context, groupID *int64, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability) *Account {
 	rule := matchOpenAIModelPriorityRule(requestedModel, s.getOpenAIModelPriorityRules(ctx))
 	if rule == nil {
 		return nil
@@ -1786,11 +1786,11 @@ func (s *OpenAIGatewayService) selectPreferredAccountByModelPriority(ctx context
 		if account == nil {
 			continue
 		}
-		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, account, requestedModel, requireCompact)
+		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, account, requestedModel, requireCompact, requiredCapability)
 		if fresh == nil {
 			continue
 		}
-		fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, requestedModel, requireCompact)
+		fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, requestedModel, requireCompact, requiredCapability)
 		if fresh == nil {
 			continue
 		}
@@ -1802,7 +1802,7 @@ func (s *OpenAIGatewayService) selectPreferredAccountByModelPriority(ctx context
 	return nil
 }
 
-func (s *OpenAIGatewayService) trySelectPreferredAccountWithLoadAwareness(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, accounts []Account, requireCompact bool) (*AccountSelectionResult, error) {
+func (s *OpenAIGatewayService) trySelectPreferredAccountWithLoadAwareness(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, accounts []Account, requireCompact bool, requiredCapability OpenAIEndpointCapability) (*AccountSelectionResult, error) {
 	rule := matchOpenAIModelPriorityRule(requestedModel, s.getOpenAIModelPriorityRules(ctx))
 	if rule == nil {
 		return nil, nil
@@ -1820,11 +1820,11 @@ func (s *OpenAIGatewayService) trySelectPreferredAccountWithLoadAwareness(ctx co
 		if account == nil {
 			continue
 		}
-		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, account, requestedModel, requireCompact)
+		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, account, requestedModel, requireCompact, requiredCapability)
 		if fresh == nil {
 			continue
 		}
-		fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, requestedModel, requireCompact)
+		fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, requestedModel, requireCompact, requiredCapability)
 		if fresh == nil {
 			continue
 		}
@@ -1988,7 +1988,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	}
 
 	// ============ Layer 2: Model-priority selection ============
-	if result, err := s.trySelectPreferredAccountWithLoadAwareness(ctx, groupID, sessionHash, requestedModel, excludedIDs, accounts, requireCompact); err != nil {
+	if result, err := s.trySelectPreferredAccountWithLoadAwareness(ctx, groupID, sessionHash, requestedModel, excludedIDs, accounts, requireCompact, requiredCapability); err != nil {
 		return nil, err
 	} else if result != nil {
 		return result, nil

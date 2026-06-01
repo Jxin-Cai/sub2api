@@ -27,13 +27,24 @@ func ResponsesToChatCompletionsRequest(req *ResponsesRequest) (*ChatCompletionsR
 		Temperature:         req.Temperature,
 		TopP:                req.TopP,
 		Stream:              req.Stream,
+		Store:               req.Store,
+		Metadata:            req.Metadata,
+		TopLogprobs:         req.TopLogprobs,
 		ServiceTier:         req.ServiceTier,
 	}
 	if req.Reasoning != nil {
 		out.ReasoningEffort = req.Reasoning.Effort
 	}
+	if format := extractResponsesTextFormat(req.Text); len(format) > 0 {
+		out.ResponseFormat = format
+	}
+	if containsString(req.Include, "message.output_text.logprobs") {
+		logprobs := true
+		out.Logprobs = &logprobs
+	}
 	if len(req.Tools) > 0 {
 		out.Tools = responsesToolsToChatTools(req.Tools)
+		out.WebSearchOptions = responsesWebSearchToolToChatOptions(req.Tools)
 	}
 	if len(req.ToolChoice) > 0 {
 		out.ToolChoice = responsesToolChoiceToChatToolChoice(req.ToolChoice)
@@ -147,6 +158,32 @@ func responsesInputToChatMessages(instructions string, inputRaw json.RawMessage)
 	}
 
 	return messages, nil
+}
+
+func containsString(values []string, value string) bool {
+	for _, existing := range values {
+		if existing == value {
+			return true
+		}
+	}
+	return false
+}
+
+func responsesWebSearchToolToChatOptions(tools []ResponsesTool) json.RawMessage {
+	for _, tool := range tools {
+		if tool.Type != "web_search" {
+			continue
+		}
+		if len(tool.UserLocation) == 0 || string(bytesTrimSpace(tool.UserLocation)) == "null" {
+			return json.RawMessage(`{}`)
+		}
+		payload, err := json.Marshal(map[string]json.RawMessage{"user_location": tool.UserLocation})
+		if err != nil {
+			return json.RawMessage(`{}`)
+		}
+		return payload
+	}
+	return nil
 }
 
 func chatCompletionsBridgeRole(role string) string {
@@ -330,6 +367,7 @@ func ChatCompletionsResponseToResponses(resp *ChatCompletionsResponse, model str
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
 		out.Output = chatMessageToResponsesOutput(choice.Message)
+		applyChatLogprobsToResponsesOutput(out.Output, choice.Logprobs)
 		if choice.FinishReason == "length" {
 			out.Status = "incomplete"
 			out.IncompleteDetails = &ResponsesIncompleteDetails{Reason: "max_output_tokens"}
@@ -359,16 +397,24 @@ func chatMessageToResponsesOutput(message ChatMessage) []ResponsesOutput {
 	}
 
 	text := chatMessageContentText(message.Content)
-	if text != "" || len(message.ToolCalls) == 0 {
+	if text != "" || message.Refusal != "" || len(message.ToolCalls) == 0 {
+		content := []ResponsesContentPart{}
+		if text != "" || message.Refusal == "" {
+			content = append(content, ResponsesContentPart{
+				Type:        "output_text",
+				Text:        text,
+				Annotations: message.Annotations,
+			})
+		}
+		if message.Refusal != "" {
+			content = append(content, ResponsesContentPart{Type: "refusal", Refusal: message.Refusal})
+		}
 		outputs = append(outputs, ResponsesOutput{
-			Type: "message",
-			ID:   generateItemID(),
-			Role: "assistant",
-			Content: []ResponsesContentPart{{
-				Type: "output_text",
-				Text: text,
-			}},
-			Status: "completed",
+			Type:    "message",
+			ID:      generateItemID(),
+			Role:    "assistant",
+			Content: content,
+			Status:  "completed",
 		})
 	}
 
@@ -388,6 +434,31 @@ func chatMessageToResponsesOutput(message ChatMessage) []ResponsesOutput {
 	}
 
 	return outputs
+}
+
+func applyChatLogprobsToResponsesOutput(outputs []ResponsesOutput, raw json.RawMessage) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return
+	}
+	contentLogprobs := payload["content"]
+	if len(contentLogprobs) == 0 || string(contentLogprobs) == "null" {
+		return
+	}
+	for i := range outputs {
+		if outputs[i].Type != "message" {
+			continue
+		}
+		for j := range outputs[i].Content {
+			if outputs[i].Content[j].Type == "output_text" {
+				outputs[i].Content[j].Logprobs = contentLogprobs
+				return
+			}
+		}
+	}
 }
 
 func emptyResponsesMessageOutput() ResponsesOutput {
@@ -415,6 +486,15 @@ func chatMessageContentText(raw json.RawMessage) string {
 		for _, part := range parts {
 			if part.Type == "text" && part.Text != "" {
 				texts = append(texts, part.Text)
+			}
+			if part.Type == "refusal" {
+				text := part.Refusal
+				if text == "" {
+					text = part.Text
+				}
+				if text != "" {
+					texts = append(texts, text)
+				}
 			}
 		}
 		return strings.Join(texts, "\n\n")

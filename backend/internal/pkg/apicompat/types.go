@@ -326,6 +326,7 @@ type ResponsesTool struct {
 	AllowedTools    json.RawMessage `json:"allowed_tools,omitempty"`
 	Headers         json.RawMessage `json:"headers,omitempty"`
 	RequireApproval string          `json:"require_approval,omitempty"`
+	UserLocation    json.RawMessage `json:"user_location,omitempty"`
 }
 
 // ResponsesResponse is the non-streaming response from POST /v1/responses.
@@ -553,6 +554,12 @@ type ChatCompletionsRequest struct {
 	Tools               []ChatTool         `json:"tools,omitempty"`
 	ToolChoice          json.RawMessage    `json:"tool_choice,omitempty"`
 	ReasoningEffort     string             `json:"reasoning_effort,omitempty"` // "low" | "medium" | "high" | "xhigh"
+	ResponseFormat      json.RawMessage    `json:"response_format,omitempty"`
+	WebSearchOptions    json.RawMessage    `json:"web_search_options,omitempty"`
+	Store               *bool              `json:"store,omitempty"`
+	Metadata            json.RawMessage    `json:"metadata,omitempty"`
+	Logprobs            *bool              `json:"logprobs,omitempty"`
+	TopLogprobs         *int               `json:"top_logprobs,omitempty"`
 	ServiceTier         string             `json:"service_tier,omitempty"`
 	Stop                json.RawMessage    `json:"stop,omitempty"` // string or []string
 
@@ -568,12 +575,14 @@ type ChatStreamOptions struct {
 
 // ChatMessage is a single message in the Chat Completions conversation.
 type ChatMessage struct {
-	Role             string          `json:"role"` // "system" | "user" | "assistant" | "tool" | "function"
-	Content          json.RawMessage `json:"content,omitempty"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
-	Name             string          `json:"name,omitempty"`
-	ToolCalls        []ChatToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	Role             string            `json:"role"` // "system" | "developer" | "user" | "assistant" | "tool" | "function"
+	Content          json.RawMessage   `json:"content,omitempty"`
+	Refusal          string            `json:"refusal,omitempty"`
+	ReasoningContent string            `json:"reasoning_content,omitempty"`
+	Name             string            `json:"name,omitempty"`
+	Annotations      []json.RawMessage `json:"annotations,omitempty"`
+	ToolCalls        []ChatToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
 
 	// Legacy function calling
 	FunctionCall *ChatFunctionCall `json:"function_call,omitempty"`
@@ -581,8 +590,9 @@ type ChatMessage struct {
 
 // ChatContentPart is a typed content part in a multi-modal message.
 type ChatContentPart struct {
-	Type     string        `json:"type"` // "text" | "image_url"
+	Type     string        `json:"type"` // "text" | "image_url" | "refusal"
 	Text     string        `json:"text,omitempty"`
+	Refusal  string        `json:"refusal,omitempty"`
 	ImageURL *ChatImageURL `json:"image_url,omitempty"`
 }
 
@@ -635,9 +645,10 @@ type ChatCompletionsResponse struct {
 
 // ChatChoice is a single completion choice.
 type ChatChoice struct {
-	Index        int         `json:"index"`
-	Message      ChatMessage `json:"message"`
-	FinishReason string      `json:"finish_reason"` // "stop" | "length" | "tool_calls" | "content_filter"
+	Index        int             `json:"index"`
+	Message      ChatMessage     `json:"message"`
+	FinishReason string          `json:"finish_reason"` // "stop" | "length" | "tool_calls" | "content_filter"
+	Logprobs     json.RawMessage `json:"logprobs,omitempty"`
 }
 
 // ChatUsage holds token counts in Chat Completions format.
@@ -686,10 +697,12 @@ type ChatChunkChoice struct {
 
 // ChatDelta carries incremental content in a streaming chunk.
 type ChatDelta struct {
-	Role             string         `json:"role,omitempty"`
-	Content          *string        `json:"content,omitempty"` // pointer: omit when not present, null vs "" matters
-	ReasoningContent *string        `json:"reasoning_content,omitempty"`
-	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
+	Role             string            `json:"role,omitempty"`
+	Content          *string           `json:"content,omitempty"` // pointer: omit when not present, null vs "" matters
+	Refusal          *string           `json:"refusal,omitempty"`
+	ReasoningContent *string           `json:"reasoning_content,omitempty"`
+	Annotations      []json.RawMessage `json:"annotations,omitempty"`
+	ToolCalls        []ChatToolCall    `json:"tool_calls,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

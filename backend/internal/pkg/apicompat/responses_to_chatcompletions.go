@@ -30,8 +30,11 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 	}
 
 	var contentText string
+	var refusalText string
 	var reasoningText string
 	var toolCalls []ChatToolCall
+	var annotations []json.RawMessage
+	var logprobs json.RawMessage
 
 	for _, item := range resp.Output {
 		switch item.Type {
@@ -42,9 +45,15 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 					if part.Text != "" {
 						contentText += part.Text
 					}
+					if len(part.Annotations) > 0 {
+						annotations = append(annotations, part.Annotations...)
+					}
+					if len(part.Logprobs) > 0 && string(part.Logprobs) != "null" {
+						logprobs = part.Logprobs
+					}
 				case "refusal":
 					if part.Refusal != "" {
-						contentText += part.Refusal
+						refusalText += part.Refusal
 					}
 				}
 			}
@@ -65,6 +74,13 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 			}
 		case "web_search_call":
 			// silently consumed — results already incorporated into text output
+		case "file_search_call", "code_interpreter_call":
+			if text := responsesToolOutputText(item); text != "" {
+				if contentText != "" {
+					contentText += "\n\n"
+				}
+				contentText += text
+			}
 		}
 	}
 
@@ -76,6 +92,16 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 		raw, _ := json.Marshal(contentText)
 		msg.Content = raw
 	}
+	if refusalText != "" {
+		msg.Refusal = refusalText
+		if len(msg.Content) == 0 {
+			raw, _ := json.Marshal(refusalText)
+			msg.Content = raw
+		}
+	}
+	if len(annotations) > 0 {
+		msg.Annotations = annotations
+	}
 	if reasoningText != "" {
 		msg.ReasoningContent = reasoningText
 	}
@@ -86,11 +112,43 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 		Index:        0,
 		Message:      msg,
 		FinishReason: finishReason,
+		Logprobs:     chatLogprobsFromResponses(logprobs),
 	}}
 
 	out.Usage = chatUsageFromResponsesUsage(resp.Usage)
 
 	return out
+}
+
+func responsesToolOutputText(item ResponsesOutput) string {
+	if item.Result != "" {
+		return item.Result
+	}
+	if item.Logs != "" {
+		return item.Logs
+	}
+	if len(item.Output) > 0 && string(item.Output) != "null" {
+		var text string
+		if err := json.Unmarshal(item.Output, &text); err == nil {
+			return text
+		}
+		return string(item.Output)
+	}
+	if len(item.Results) > 0 && string(item.Results) != "null" {
+		return string(item.Results)
+	}
+	return ""
+}
+
+func chatLogprobsFromResponses(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]json.RawMessage{"content": raw})
+	if err != nil {
+		return nil
+	}
+	return payload
 }
 
 func responsesStatusToChatFinishReason(status string, details *ResponsesIncompleteDetails, toolCalls []ChatToolCall) string {
@@ -149,8 +207,12 @@ func ResponsesEventToChatChunks(evt *ResponsesStreamEvent, state *ResponsesEvent
 		return resToChatHandleContentPartAdded(evt, state)
 	case "response.output_text.delta":
 		return resToChatHandleTextDelta(evt, state)
+	case "response.output_text.annotation.added":
+		return resToChatHandleAnnotationAdded(evt, state)
 	case "response.output_item.added":
 		return resToChatHandleOutputItemAdded(evt, state)
+	case "response.output_item.done":
+		return resToChatHandleOutputItemDone(evt, state)
 	case "response.function_call_arguments.delta":
 		return resToChatHandleFuncArgsDelta(evt, state)
 	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
@@ -237,12 +299,18 @@ func resToChatHandleContentPartAdded(evt *ResponsesStreamEvent, state *Responses
 
 	switch part.Type {
 	case "output_text":
-		if part.Text == "" {
-			return nil
+		var chunks []ChatCompletionsChunk
+		if part.Text != "" {
+			clone := *evt
+			clone.Delta = part.Text
+			chunks = append(chunks, resToChatHandleTextDelta(&clone, state)...)
 		}
-		clone := *evt
-		clone.Delta = part.Text
-		return resToChatHandleTextDelta(&clone, state)
+		for _, annotation := range part.Annotations {
+			clone := *evt
+			clone.Annotation = annotation
+			chunks = append(chunks, resToChatHandleAnnotationAdded(&clone, state)...)
+		}
+		return chunks
 	case "refusal":
 		text := part.Refusal
 		if text == "" {
@@ -268,7 +336,14 @@ func resToChatHandleRefusalDelta(evt *ResponsesStreamEvent, state *ResponsesEven
 	if text == "" {
 		return nil
 	}
-	return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{Content: &text})}
+	return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{Content: &text, Refusal: &text})}
+}
+
+func resToChatHandleAnnotationAdded(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
+	if len(evt.Annotation) == 0 || string(evt.Annotation) == "null" {
+		return nil
+	}
+	return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{Annotations: []json.RawMessage{evt.Annotation}})}
 }
 
 func decodeChatResponsesPart(raw json.RawMessage) *ResponsesOutputPart {
@@ -321,6 +396,26 @@ func resToChatHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 			},
 		}},
 	})}
+}
+
+func resToChatHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
+	if evt.Item == nil {
+		return nil
+	}
+	switch evt.Item.Type {
+	case "file_search_call", "code_interpreter_call":
+		text := responsesToolOutputText(*evt.Item)
+		if text == "" {
+			return nil
+		}
+		if state.SawText {
+			text = "\n\n" + text
+		}
+		state.SawText = true
+		return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{Content: &text})}
+	default:
+		return nil
+	}
 }
 
 func resToChatHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {
