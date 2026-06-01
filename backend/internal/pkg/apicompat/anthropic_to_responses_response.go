@@ -22,9 +22,11 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 	}
 
 	out := &ResponsesResponse{
-		ID:     id,
-		Object: "response",
-		Model:  resp.Model,
+		ID:        id,
+		Object:    "response",
+		CreatedAt: time.Now().Unix(),
+		Model:     resp.Model,
+		Text:      defaultResponsesText,
 	}
 	if len(resp.Container) > 0 {
 		if conversation := anthropicContainerToResponsesConversation(resp.Container); conversation != nil {
@@ -135,6 +137,7 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 		})
 	}
 	out.Output = outputs
+	out.OutputText = collectResponsesOutputText(outputs)
 
 	// Map stop_reason → status
 	out.Status = anthropicStopReasonToResponsesStatus(resp.StopReason, resp.Content)
@@ -651,6 +654,7 @@ func makeResponsesCreatedEvent(state *AnthropicEventToResponsesState) ResponsesS
 			Model:     state.Model,
 			Status:    "in_progress",
 			Output:    []ResponsesOutput{},
+			Text:      defaultResponsesText,
 		},
 	}
 }
@@ -694,6 +698,7 @@ func makeResponsesCompletedEvent(
 			Status:            status,
 			Output:            output,
 			OutputText:        collectResponsesOutputText(output),
+			Text:              defaultResponsesText,
 			Usage:             usage,
 			IncompleteDetails: incompleteDetails,
 		},

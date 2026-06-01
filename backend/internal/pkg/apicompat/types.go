@@ -696,6 +696,10 @@ type ChatDelta struct {
 // Shared constants
 // ---------------------------------------------------------------------------
 
+// defaultResponsesText is the default value for the "text" field in a
+// Responses API response. OpenAI always includes this field.
+var defaultResponsesText = json.RawMessage(`{"format":{"type":"text"}}`)
+
 // minMaxOutputTokens is the floor for max_output_tokens in a Responses request.
 // Very small values may cause upstream API errors, so we enforce a minimum.
 const minMaxOutputTokens = 128
