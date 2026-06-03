@@ -2863,6 +2863,23 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 	}
 
+	if isCompactRequest {
+		normalizedCompact, normalized, compactErr := normalizeOpenAICompactRequestBody(body)
+		if compactErr != nil {
+			return nil, fmt.Errorf("normalize compact body: %w", compactErr)
+		}
+		if normalized {
+			body = normalizedCompact
+			if err := json.Unmarshal(body, &reqBody); err != nil {
+				return nil, fmt.Errorf("parse normalized compact body: %w", err)
+			}
+			if c != nil {
+				c.Set(OpenAIParsedRequestBodyKey, reqBody)
+			}
+		}
+		reqStream = false
+	}
+
 	// Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
@@ -5849,6 +5866,7 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 		"reasoning",
 		"text",
 		"previous_response_id",
+		"context_management",
 	} {
 		value := gjson.GetBytes(body, field)
 		if !value.Exists() {
@@ -5861,10 +5879,14 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 		normalized = next
 	}
 
-	if bytes.Equal(bytes.TrimSpace(body), bytes.TrimSpace(normalized)) {
+	sanitized, _, err := sanitizeOpenAIResponsesRequestBody(normalized)
+	if err != nil {
+		return body, false, err
+	}
+	if bytes.Equal(bytes.TrimSpace(body), bytes.TrimSpace(sanitized)) {
 		return body, false, nil
 	}
-	return normalized, true, nil
+	return sanitized, true, nil
 }
 
 func resolveOpenAICompactSessionID(c *gin.Context) string {

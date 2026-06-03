@@ -1974,7 +1974,7 @@ func TestOpenAIResponsesRequestPathSuffix(t *testing.T) {
 }
 
 func TestNormalizeOpenAICompactRequestBodyPreservesCurrentCodexPayloadFields(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":"compact me"}],"instructions":"compact-test","tools":[{"type":"function","name":"shell"}],"parallel_tool_calls":true,"reasoning":{"effort":"high"},"text":{"verbosity":"low"},"previous_response_id":"resp_123","store":true,"stream":true,"prompt_cache_key":"cache_123"}`)
+	body := []byte(`{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":"compact me"}],"instructions":"compact-test","tools":[{"type":"function","name":"shell"}],"parallel_tool_calls":true,"reasoning":{"effort":"high"},"text":{"verbosity":"low"},"previous_response_id":"resp_123","context_management":[{"type":"compaction","compact_threshold":150000,"ignored":true},{"type":"clear_thinking_20251015"}],"store":true,"stream":true,"prompt_cache_key":"cache_123"}`)
 
 	normalized, changed, err := normalizeOpenAICompactRequestBody(body)
 
@@ -1986,9 +1986,12 @@ func TestNormalizeOpenAICompactRequestBodyPreservesCurrentCodexPayloadFields(t *
 	require.Equal(t, "high", gjson.GetBytes(normalized, "reasoning.effort").String())
 	require.Equal(t, "low", gjson.GetBytes(normalized, "text.verbosity").String())
 	require.Equal(t, "resp_123", gjson.GetBytes(normalized, "previous_response_id").String())
+	require.JSONEq(t, `[{"compact_threshold":150000,"type":"compaction"}]`, gjson.GetBytes(normalized, "context_management").Raw)
 	require.False(t, gjson.GetBytes(normalized, "store").Exists())
 	require.False(t, gjson.GetBytes(normalized, "stream").Exists())
 	require.False(t, gjson.GetBytes(normalized, "prompt_cache_key").Exists())
+	require.NotContains(t, string(normalized), "ignored")
+	require.NotContains(t, string(normalized), "clear_thinking_20251015")
 }
 
 func TestOpenAIBuildUpstreamRequestOpenAIPassthroughPreservesCompactPath(t *testing.T) {
@@ -2630,6 +2633,46 @@ func TestOpenAIBuildUpstreamRequest_PreservesCompactionContextManagement(t *test
 	require.Contains(t, string(requestBody), `"context_management":[{"compact_threshold":150000,"type":"compaction"}]`)
 	require.NotContains(t, string(requestBody), `ignored`)
 	require.NotContains(t, string(requestBody), `clear_thinking_20251015`)
+}
+
+func TestOpenAIGatewayServiceForwardCompact_PreservesCompactionContextManagement(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"gpt-5.2","context_management":[{"type":"compaction","compact_threshold":150000,"ignored":true},{"type":"clear_thinking_20251015"}],"store":true,"stream":true,"prompt_cache_key":"cache_123"}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid-compact-context-management"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_compact_context_management","status":"completed","model":"gpt-5.2","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+	}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	account := &Account{
+		ID:          1,
+		Name:        "openai-oauth",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token":       "oauth-token",
+			"chatgpt_account_id": "chatgpt-acc",
+		},
+		Status:      StatusActive,
+		Schedulable: true,
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, chatgptCodexURL+"/compact", upstream.lastReq.URL.String())
+	require.JSONEq(t, `[{"compact_threshold":150000,"type":"compaction"}]`, gjson.GetBytes(upstream.lastBody, "context_management").Raw)
+	require.False(t, gjson.GetBytes(upstream.lastBody, "store").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "stream").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
+	require.NotContains(t, string(upstream.lastBody), "ignored")
+	require.NotContains(t, string(upstream.lastBody), "clear_thinking_20251015")
 }
 
 func TestOpenAIBuildUpstreamRequest_PreservesNoneReasoningEffort(t *testing.T) {
