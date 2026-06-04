@@ -283,8 +283,10 @@ func ResponsesEventToAnthropicEvents(
 		return resToAnthHandleBlockDone(state)
 	// response.done 是 Realtime/WS 与项目透传路径使用的终止别名；
 	// 普通 Responses HTTP SSE 的公开终止事件仍以 response.completed 为主。
-	case "response.completed", "response.done", "response.incomplete", "response.failed":
+	case "response.completed", "response.done", "response.incomplete":
 		return resToAnthHandleCompleted(evt, state)
+	case "response.failed", "response.cancelled", "response.canceled":
+		return resToAnthHandleFailed(evt, state)
 	case "error":
 		return resToAnthHandleError(evt, state)
 	default:
@@ -1014,7 +1016,10 @@ func resToAnthHandleFailed(evt *ResponsesStreamEvent, state *ResponsesEventToAnt
 	events = append(events, closeCurrentBlock(state)...)
 
 	msg := "The response failed due to an unknown error."
-	if evt.Response != nil && evt.Response.Error != nil {
+	if evt.Type == "response.cancelled" || evt.Type == "response.canceled" {
+		msg = "The response was cancelled."
+	}
+	if evt.Response != nil && evt.Response.Error != nil && evt.Response.Error.Message != "" {
 		msg = evt.Response.Error.Message
 	}
 

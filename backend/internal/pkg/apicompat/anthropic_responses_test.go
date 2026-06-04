@@ -997,11 +997,12 @@ func TestStreamingFailed(t *testing.T) {
 		},
 	}, state)
 
-	// response.failed goes through the completed path: close block + message_delta + message_stop
-	require.Len(t, events, 3)
+	require.Len(t, events, 2)
 	assert.Equal(t, "content_block_stop", events[0].Type)
-	assert.Equal(t, "message_delta", events[1].Type)
-	assert.Equal(t, "message_stop", events[2].Type)
+	assert.Equal(t, "error", events[1].Type)
+	require.NotNil(t, events[1].Error)
+	assert.Equal(t, "Internal error", events[1].Error.Message)
+	assert.Nil(t, FinalizeResponsesAnthropicStream(state))
 }
 
 func TestStreamingFailedNoOutput(t *testing.T) {
@@ -1023,10 +1024,39 @@ func TestStreamingFailedNoOutput(t *testing.T) {
 		},
 	}, state)
 
-	// response.failed is handled by the completed path, emitting message_delta + message_stop.
-	require.Len(t, events, 2)
-	assert.Equal(t, "message_delta", events[0].Type)
-	assert.Equal(t, "message_stop", events[1].Type)
+	require.Len(t, events, 1)
+	assert.Equal(t, "error", events[0].Type)
+	require.NotNil(t, events[0].Error)
+	assert.Equal(t, "Too many requests", events[0].Error.Message)
+	assert.Nil(t, FinalizeResponsesAnthropicStream(state))
+}
+
+func TestStreamingCancelled(t *testing.T) {
+	for _, eventType := range []string{"response.cancelled", "response.canceled"} {
+		t.Run(eventType, func(t *testing.T) {
+			state := NewResponsesEventToAnthropicState()
+			ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+				Type:     "response.created",
+				Response: &ResponsesResponse{ID: "resp_cancelled", Model: "gpt-5.2"},
+			}, state)
+			ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+				Type:  "response.output_text.delta",
+				Delta: "Partial output before cancellation",
+			}, state)
+
+			events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+				Type:     eventType,
+				Response: &ResponsesResponse{Status: "cancelled"},
+			}, state)
+
+			require.Len(t, events, 2)
+			assert.Equal(t, "content_block_stop", events[0].Type)
+			assert.Equal(t, "error", events[1].Type)
+			require.NotNil(t, events[1].Error)
+			assert.Equal(t, "The response was cancelled.", events[1].Error.Message)
+			assert.Nil(t, FinalizeResponsesAnthropicStream(state))
+		})
+	}
 }
 
 func TestResponsesToAnthropic_Failed(t *testing.T) {
@@ -1940,18 +1970,6 @@ func TestAnthropicToResponses_MCPRoundTripFields(t *testing.T) {
 				{"type":"mcp_tool_result","tool_use_id":"call_mcp","content":[{"type":"text","text":"found"}]}
 			]`)},
 		},
-// ---------------------------------------------------------------------------
-// isReasoningModel / temperature-stripping tests
-// ---------------------------------------------------------------------------
-
-func TestAnthropicToResponses_TemperatureStrippedForReasoningModel(t *testing.T) {
-	temp := 0.7
-	req := &AnthropicRequest{
-		Model:       "gpt-5.2",
-		MaxTokens:   1024,
-		Messages:    []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
-		Temperature: &temp,
-		TopP:        &temp,
 	}
 
 	resp, err := AnthropicToResponses(req)
@@ -1983,6 +2001,26 @@ func TestAnthropicToResponses_TemperatureStrippedForReasoningModel(t *testing.T)
 	assert.Equal(t, "mcp", items[2].Namespace)
 	assert.JSONEq(t, `[{"type":"text","text":"found"}]`, string(items[2].OutputRaw))
 	assert.JSONEq(t, `{"type":"mcp_tool_result","tool_use_id":"call_mcp","content":[{"type":"text","text":"found"}]}`, stripEmptyAnthropicFields(items[2].RawItem))
+}
+
+// ---------------------------------------------------------------------------
+// isReasoningModel / temperature-stripping tests
+// ---------------------------------------------------------------------------
+
+func TestAnthropicToResponses_TemperatureStrippedForReasoningModel(t *testing.T) {
+	temp := 0.7
+	req := &AnthropicRequest{
+		Model:       "gpt-5.2",
+		MaxTokens:   1024,
+		Messages:    []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}},
+		Temperature: &temp,
+		TopP:        &temp,
+	}
+
+	resp, err := AnthropicToResponses(req)
+	require.NoError(t, err)
+	assert.Nil(t, resp.Temperature)
+	assert.Nil(t, resp.TopP)
 }
 
 func TestResponsesToAnthropicRequest_MCPRoundTripFields(t *testing.T) {
@@ -2340,14 +2378,6 @@ func TestResponsesToAnthropicRequest_ContextManagementWrapsEditsArray(t *testing
 	anth, err := ResponsesToAnthropicRequest(req)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"edits":[{"type":"clear_function_results"}]}`, string(anth.ContextManagement))
-	assert.Nil(t, resp.Temperature, "reasoning model: temperature must be stripped")
-	assert.Nil(t, resp.TopP, "reasoning model: top_p must be stripped")
-
-	// Verify the fields are absent from the serialised JSON.
-	b, err := json.Marshal(resp)
-	require.NoError(t, err)
-	assert.NotContains(t, string(b), `"temperature"`)
-	assert.NotContains(t, string(b), `"top_p"`)
 }
 
 func TestAnthropicToResponses_TemperatureStrippedForAllGpt5Variants(t *testing.T) {

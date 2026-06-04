@@ -537,6 +537,74 @@ func TestForwardAsAnthropic_AttachesPreviousResponseIDForCompatContinuation(t *t
 	require.Equal(t, "second", gjson.GetBytes(upstream.lastBody, "input.1.content.0.text").String())
 }
 
+func TestForwardAsAnthropic_DoesNotStoreUnsafeTerminalResponseIDForCompatContinuation(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name           string
+		terminalEvent  string
+		status         string
+		details        string
+		wantStopReason string
+	}{
+		{name: "failed", terminalEvent: "response.failed", status: "failed"},
+		{name: "incomplete context length", terminalEvent: "response.incomplete", status: "incomplete", details: `,"incomplete_details":{"reason":"context_length_exceeded"}`, wantStopReason: "end_turn"},
+		{name: "incomplete max output", terminalEvent: "response.incomplete", status: "incomplete", details: `,"incomplete_details":{"reason":"max_output_tokens"}`, wantStopReason: "max_tokens"},
+		{name: "cancelled british spelling", terminalEvent: "response.cancelled", status: "cancelled"},
+		{name: "canceled american spelling", terminalEvent: "response.canceled", status: "canceled"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := &httpUpstreamRecorder{}
+			svc := &OpenAIGatewayService{
+				httpUpstream: upstream,
+				cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+			}
+			account := &Account{
+				ID:          1,
+				Name:        "openai-apikey",
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeAPIKey,
+				Concurrency: 1,
+				Credentials: map[string]any{
+					"api_key":  "sk-test",
+					"base_url": "https://api.openai.com/v1",
+				},
+			}
+
+			firstBody := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"first"}],"stream":false}`)
+			upstream.resp = openAICompatSSETerminalResponse(tt.terminalEvent, "resp_unsafe", "gpt-5.3-codex", tt.status, tt.details)
+			firstRec := httptest.NewRecorder()
+			firstCtx, _ := gin.CreateTestContext(firstRec)
+			firstCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(firstBody))
+			firstCtx.Request.Header.Set("Content-Type", "application/json")
+
+			firstResult, err := svc.ForwardAsAnthropic(context.Background(), firstCtx, account, firstBody, "stable-cache-key", "gpt-5.3-codex")
+			require.NoError(t, err)
+			require.NotNil(t, firstResult)
+			require.Equal(t, "resp_unsafe", firstResult.ResponseID)
+			if tt.wantStopReason != "" {
+				require.Equal(t, tt.wantStopReason, gjson.Get(firstRec.Body.String(), "stop_reason").String())
+			}
+
+			secondBody := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"ok"},{"role":"user","content":"second"}],"stream":false}`)
+			upstream.resp = openAICompatSSECompletedResponse("resp_second", "gpt-5.3-codex")
+			secondRec := httptest.NewRecorder()
+			secondCtx, _ := gin.CreateTestContext(secondRec)
+			secondCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(secondBody))
+			secondCtx.Request.Header.Set("Content-Type", "application/json")
+
+			secondResult, err := svc.ForwardAsAnthropic(context.Background(), secondCtx, account, secondBody, "stable-cache-key", "gpt-5.3-codex")
+			require.NoError(t, err)
+			require.NotNil(t, secondResult)
+			require.Equal(t, "resp_second", secondResult.ResponseID)
+			require.False(t, gjson.GetBytes(upstream.lastBody, "previous_response_id").Exists())
+		})
+	}
+}
+
 func TestForwardAsAnthropic_PreviousResponseIDKeepsMultiToolCallContext(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
@@ -1186,6 +1254,20 @@ func TestForwardAsAnthropic_StoresStreamingResponseIDWithoutUsage(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, secondResult)
 	require.Equal(t, "resp_stream_first", gjson.GetBytes(upstream.lastBody, "previous_response_id").String())
+}
+
+func openAICompatSSETerminalResponse(eventType, responseID, model, status, extraResponseFields string) *http.Response {
+	body := strings.Join([]string{
+		`data: {"type":"` + eventType + `","response":{"id":"` + responseID + `","object":"response","model":"` + model + `","status":"` + status + `"` + extraResponseFields + `,"output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_" + responseID}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
 }
 
 func openAICompatSSECompletedResponse(responseID, model string) *http.Response {
