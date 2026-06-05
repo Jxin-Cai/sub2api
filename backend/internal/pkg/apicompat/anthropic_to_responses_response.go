@@ -391,7 +391,7 @@ func anthToResHandleContentBlockStart(evt *AnthropicStreamEvent, state *Anthropi
 			OutputIndex:  state.OutputIndex,
 			ContentIndex: state.ContentIndex,
 			ItemID:       state.CurrentItemID,
-			Part:         mustMarshalResponsesPart(ResponsesOutputPart{Type: "output_text"}),
+			Part:         &ResponsesContentPart{Type: "output_text"},
 		}))
 
 	case "tool_use", "mcp_tool_use":
@@ -537,7 +537,7 @@ func anthToResHandleContentBlockStop(_ *AnthropicStreamEvent, state *AnthropicEv
 				OutputIndex:  state.OutputIndex,
 				ContentIndex: state.ContentIndex,
 				ItemID:       state.CurrentItemID,
-				Part:         mustMarshalResponsesPart(part),
+				Part:         &part,
 			}),
 		}
 	}

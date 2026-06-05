@@ -566,14 +566,7 @@ func encodeReasoningItemSignature(item ResponsesOutput) string {
 }
 
 func encodeCompactionItemSignature(item ResponsesOutput) string {
-	return encodeOpenAIReasoningSignatureEnvelope(openAIReasoningSignatureEnvelope{
-		Version:          openAIReasoningSignatureVersion,
-		Type:             "compaction",
-		ID:               item.ID,
-		EncryptedContent: item.EncryptedContent,
-		Summary:          item.Summary,
-		Status:           item.Status,
-	})
+	return encodeCompactionSignature(item.ID, item.EncryptedContent)
 }
 
 func encodeOpenAIReasoningSignatureEnvelope(envelope openAIReasoningSignatureEnvelope) string {

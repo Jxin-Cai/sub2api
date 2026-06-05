@@ -1203,9 +1203,8 @@ func TestAnthropicEventToResponsesStream_BuildsCompletedOutput(t *testing.T) {
 	require.Len(t, events, 2)
 	assert.Equal(t, "response.output_item.added", events[0].Type)
 	assert.Equal(t, "response.content_part.added", events[1].Type)
-	var part ResponsesOutputPart
-	require.NoError(t, json.Unmarshal(events[1].Part, &part))
-	assert.Equal(t, "output_text", part.Type)
+	require.NotNil(t, events[1].Part)
+	assert.Equal(t, "output_text", events[1].Part.Type)
 
 	events = AnthropicEventToResponsesEvents(&AnthropicStreamEvent{
 		Type:  "content_block_delta",
@@ -1293,7 +1292,7 @@ func TestResponsesEventToAnthropicEvents_ContentPartRefusalAndReasoningText(t *t
 		Type:         "response.content_part.added",
 		OutputIndex:  0,
 		ContentIndex: 0,
-		Part:         json.RawMessage(`{"type":"output_text","text":"Hello"}`),
+		Part:         &ResponsesContentPart{Type: "output_text", Text: "Hello"},
 	}, state)
 	require.Len(t, events, 2)
 	assert.Equal(t, "content_block_start", events[0].Type)
@@ -1773,7 +1772,7 @@ func TestOpenAIReasoningSignatureEnvelope_RoundTripsReasoning(t *testing.T) {
 	assert.Equal(t, item.Status, decoded.Status)
 }
 
-func TestOpenAIReasoningSignatureEnvelope_RoundTripsCompaction(t *testing.T) {
+func TestCompactionItemSignature_UsesCm1Carrier(t *testing.T) {
 	item := ResponsesOutput{
 		Type:             "compaction",
 		ID:               "rs_compact",
@@ -1782,7 +1781,32 @@ func TestOpenAIReasoningSignatureEnvelope_RoundTripsCompaction(t *testing.T) {
 		Status:           "completed",
 	}
 
-	decoded := decodeOpenAIReasoningSignatureEnvelope(encodeCompactionItemSignature(item))
+	sig := encodeCompactionItemSignature(item)
+	assert.Equal(t, "cm1#enc@compact#payload@rs_compact", sig)
+	assert.Nil(t, decodeOpenAIReasoningSignatureEnvelope(sig))
+	decoded := decodeCompactionSignature(sig)
+	require.NotNil(t, decoded)
+	assert.Equal(t, item.ID, decoded.id)
+	assert.Equal(t, item.EncryptedContent, decoded.encryptedContent)
+}
+
+func TestOpenAIReasoningSignatureEnvelope_DecodesLegacyCompaction(t *testing.T) {
+	item := ResponsesOutput{
+		Type:             "compaction",
+		ID:               "rs_compact",
+		EncryptedContent: "enc@compact#payload",
+		Summary:          []ResponsesSummary{{Type: "summary_text", Text: "compact summary"}},
+		Status:           "completed",
+	}
+
+	decoded := decodeOpenAIReasoningSignatureEnvelope(encodeOpenAIReasoningSignatureEnvelope(openAIReasoningSignatureEnvelope{
+		Version:          openAIReasoningSignatureVersion,
+		Type:             "compaction",
+		ID:               item.ID,
+		EncryptedContent: item.EncryptedContent,
+		Summary:          item.Summary,
+		Status:           item.Status,
+	}))
 	require.NotNil(t, decoded)
 	assert.Equal(t, "compaction", decoded.Type)
 	assert.Equal(t, item.ID, decoded.ID)
@@ -2161,6 +2185,30 @@ func TestResponsesToAnthropicRequest_ContextManagementCompaction(t *testing.T) {
 	anth, err := ResponsesToAnthropicRequest(req)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":150000}},{"type":"clear_function_results"}]}`, string(anth.ContextManagement))
+}
+
+func TestResponsesToAnthropicRequest_ContextManagementObjectCompaction(t *testing.T) {
+	req := &ResponsesRequest{
+		Model:             "gpt-5.2",
+		Input:             json.RawMessage(`[{"role":"user","content":"Hello"}]`),
+		ContextManagement: json.RawMessage(`{"edits":[{"type":"compaction","compact_threshold":150000},{"type":"clear_function_results"}]}`),
+	}
+
+	anth, err := ResponsesToAnthropicRequest(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"edits":[{"type":"compact_20260112","trigger":{"type":"input_tokens","value":150000}},{"type":"clear_function_results"}]}`, string(anth.ContextManagement))
+}
+
+func TestResponsesToAnthropicRequest_ContextManagementCompactionWithoutThreshold(t *testing.T) {
+	req := &ResponsesRequest{
+		Model:             "gpt-5.2",
+		Input:             json.RawMessage(`[{"role":"user","content":"Hello"}]`),
+		ContextManagement: json.RawMessage(`[{"type":"compaction"}]`),
+	}
+
+	anth, err := ResponsesToAnthropicRequest(req)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"edits":[{"type":"compact_20260112"}]}`, string(anth.ContextManagement))
 }
 
 func TestAnthropicToResponsesResponse_MCPToolUseAndContainer(t *testing.T) {

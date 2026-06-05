@@ -511,25 +511,17 @@ func resToAnthHandleRefusalDone(evt *ResponsesStreamEvent, state *ResponsesEvent
 	return resToAnthHandleOutputTextDone(&clone, state)
 }
 
-func decodeResponsesOutputPart(raw json.RawMessage) *ResponsesOutputPart {
-	if len(raw) == 0 {
+func decodeResponsesOutputPart(contentPart *ResponsesContentPart) *ResponsesOutputPart {
+	if contentPart == nil || contentPart.Type == "" {
 		return nil
 	}
-	var part ResponsesOutputPart
-	if err := json.Unmarshal(raw, &part); err == nil && part.Type != "" {
-		return &part
+	return &ResponsesOutputPart{
+		Type:        contentPart.Type,
+		Text:        contentPart.Text,
+		Refusal:     contentPart.Refusal,
+		Annotations: contentPart.Annotations,
+		RawPart:     mustMarshalResponsesPart(contentPart),
 	}
-	var contentPart ResponsesContentPart
-	if err := json.Unmarshal(raw, &contentPart); err == nil && contentPart.Type != "" {
-		return &ResponsesOutputPart{
-			Type:        contentPart.Type,
-			Text:        contentPart.Text,
-			Refusal:     contentPart.Refusal,
-			Annotations: contentPart.Annotations,
-			RawPart:     raw,
-		}
-	}
-	return nil
 }
 
 func resToAnthHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {

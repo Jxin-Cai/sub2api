@@ -1054,7 +1054,7 @@ func TestResponsesEventToChatChunks_ContentPartAddedAndRefusal(t *testing.T) {
 	chunks := ResponsesEventToChatChunks(&ResponsesStreamEvent{
 		Type:         "response.content_part.added",
 		ContentIndex: 0,
-		Part:         json.RawMessage(`{"type":"output_text","text":"Hello"}`),
+		Part:         &ResponsesContentPart{Type: "output_text", Text: "Hello"},
 	}, state)
 	require.Len(t, chunks, 1)
 	require.NotNil(t, chunks[0].Choices[0].Delta.Content)
@@ -1331,12 +1331,12 @@ func TestBufferedResponseAccumulator_ContentPartsAndRefusal(t *testing.T) {
 	acc.ProcessEvent(&ResponsesStreamEvent{
 		Type:         "response.content_part.added",
 		ContentIndex: 0,
-		Part:         json.RawMessage(`{"type":"output_text","text":"Hello"}`),
+		Part:         &ResponsesContentPart{Type: "output_text", Text: "Hello"},
 	})
 	acc.ProcessEvent(&ResponsesStreamEvent{
 		Type:         "response.content_part.added",
 		ContentIndex: 1,
-		Part:         json.RawMessage(`{"type":"refusal","refusal":"Sorry"}`),
+		Part:         &ResponsesContentPart{Type: "refusal", Refusal: "Sorry"},
 	})
 
 	output := acc.BuildOutput()

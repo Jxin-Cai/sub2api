@@ -314,7 +314,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			break
 		}
 
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		respBody := s.readUpstreamErrorBody(resp)
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 

@@ -346,25 +346,17 @@ func resToChatHandleAnnotationAdded(evt *ResponsesStreamEvent, state *ResponsesE
 	return []ChatCompletionsChunk{makeChatDeltaChunk(state, ChatDelta{Annotations: []json.RawMessage{evt.Annotation}})}
 }
 
-func decodeChatResponsesPart(raw json.RawMessage) *ResponsesOutputPart {
-	if len(raw) == 0 {
+func decodeChatResponsesPart(contentPart *ResponsesContentPart) *ResponsesOutputPart {
+	if contentPart == nil || contentPart.Type == "" {
 		return nil
 	}
-	var part ResponsesOutputPart
-	if err := json.Unmarshal(raw, &part); err == nil && part.Type != "" {
-		return &part
+	return &ResponsesOutputPart{
+		Type:        contentPart.Type,
+		Text:        contentPart.Text,
+		Refusal:     contentPart.Refusal,
+		Annotations: contentPart.Annotations,
+		RawPart:     mustMarshalResponsesPart(contentPart),
 	}
-	var contentPart ResponsesContentPart
-	if err := json.Unmarshal(raw, &contentPart); err == nil && contentPart.Type != "" {
-		return &ResponsesOutputPart{
-			Type:        contentPart.Type,
-			Text:        contentPart.Text,
-			Refusal:     contentPart.Refusal,
-			Annotations: contentPart.Annotations,
-			RawPart:     raw,
-		}
-	}
-	return nil
 }
 
 func resToChatHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventToChatState) []ChatCompletionsChunk {

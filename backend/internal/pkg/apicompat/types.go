@@ -522,10 +522,13 @@ type ResponsesStreamEvent struct {
 	CallID      string          `json:"call_id,omitempty"`
 	Name        string          `json:"name,omitempty"`
 	Arguments   string          `json:"arguments,omitempty"`
-	Part        json.RawMessage `json:"part,omitempty"`
 	Annotation  json.RawMessage `json:"annotation,omitempty"`
 	Logprobs    json.RawMessage `json:"logprobs,omitempty"`
 	Obfuscation string          `json:"obfuscation,omitempty"`
+
+	// response.content_part.added / done and
+	// response.reasoning_summary_part.added / done
+	Part *ResponsesContentPart `json:"part,omitempty"`
 
 	// error event fields
 	Code    string `json:"code,omitempty"`
