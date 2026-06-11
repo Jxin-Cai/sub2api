@@ -1365,6 +1365,50 @@ func TestBufferedResponseAccumulator_Reasoning(t *testing.T) {
 	assert.Equal(t, "Step 1: think about it", output[0].Summary[0].Text)
 }
 
+func TestBufferedResponseAccumulator_ReasoningSummaryTextDone(t *testing.T) {
+	acc := NewBufferedResponseAccumulator()
+
+	acc.ProcessEvent(&ResponsesStreamEvent{Type: "response.reasoning_summary_text.done", Text: "done summary"})
+
+	assert.True(t, acc.HasContent())
+	output := acc.BuildOutput()
+	require.Len(t, output, 1)
+	assert.Equal(t, "reasoning", output[0].Type)
+	require.Len(t, output[0].Summary, 1)
+	assert.Equal(t, "done summary", output[0].Summary[0].Text)
+}
+
+func TestBufferedResponseAccumulator_ReasoningSummaryPartDone(t *testing.T) {
+	acc := NewBufferedResponseAccumulator()
+
+	acc.ProcessEvent(&ResponsesStreamEvent{
+		Type: "response.reasoning_summary_part.done",
+		Part: &ResponsesContentPart{Type: "summary_text", Text: "part done summary"},
+	})
+
+	assert.True(t, acc.HasContent())
+	output := acc.BuildOutput()
+	require.Len(t, output, 1)
+	assert.Equal(t, "reasoning", output[0].Type)
+	require.Len(t, output[0].Summary, 1)
+	assert.Equal(t, "part done summary", output[0].Summary[0].Text)
+}
+
+func TestBufferedResponseAccumulator_ReasoningSummaryPartDoesNotDuplicateDelta(t *testing.T) {
+	acc := NewBufferedResponseAccumulator()
+
+	acc.ProcessEvent(&ResponsesStreamEvent{Type: "response.reasoning_summary_text.delta", Delta: "delta summary"})
+	acc.ProcessEvent(&ResponsesStreamEvent{
+		Type: "response.reasoning_summary_part.done",
+		Part: &ResponsesContentPart{Type: "summary_text", Text: "delta summary"},
+	})
+
+	output := acc.BuildOutput()
+	require.Len(t, output, 1)
+	require.Len(t, output[0].Summary, 1)
+	assert.Equal(t, "delta summary", output[0].Summary[0].Text)
+}
+
 func TestBufferedResponseAccumulator_Mixed(t *testing.T) {
 	acc := NewBufferedResponseAccumulator()
 
@@ -1420,6 +1464,27 @@ func TestBufferedResponseAccumulator_SupplementEmptyOutput(t *testing.T) {
 	assert.Equal(t, "Hello", resp.Output[0].Content[0].Text)
 	// Usage should be untouched
 	assert.Equal(t, 10, resp.Usage.InputTokens)
+}
+
+func TestBufferedResponseAccumulator_SupplementEmptyOutputFromReasoningSummaryPart(t *testing.T) {
+	acc := NewBufferedResponseAccumulator()
+	acc.ProcessEvent(&ResponsesStreamEvent{
+		Type: "response.reasoning_summary_part.done",
+		Part: &ResponsesContentPart{Type: "summary_text", Text: "reconstructed summary"},
+	})
+
+	resp := &ResponsesResponse{
+		ID:     "resp_reasoning_part",
+		Status: "completed",
+		Output: []ResponsesOutput{},
+	}
+
+	acc.SupplementResponseOutput(resp)
+
+	require.Len(t, resp.Output, 1)
+	assert.Equal(t, "reasoning", resp.Output[0].Type)
+	require.Len(t, resp.Output[0].Summary, 1)
+	assert.Equal(t, "reconstructed summary", resp.Output[0].Summary[0].Text)
 }
 
 func TestBufferedResponseAccumulator_NoSupplementWhenOutputExists(t *testing.T) {

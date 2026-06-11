@@ -478,7 +478,7 @@ func (s *OpenAIGatewayService) handleAnthropicCompactResponse(
 
 	if isEventStreamResponse(resp.Header) || looksLikeSSEBody(respBody) {
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
-		return s.handleAnthropicBufferedStreamingResponse(resp, c, originalModel, billingModel, upstreamModel, startTime)
+		return s.handleAnthropicBufferedStreamingResponse(resp, c, originalModel, billingModel, upstreamModel, startTime, true)
 	}
 
 	var responsesResp apicompat.ResponsesResponse
@@ -500,6 +500,7 @@ func (s *OpenAIGatewayService) handleAnthropicCompactResponse(
 	}
 
 	anthropicResp := apicompat.ResponsesToAnthropic(&responsesResp, originalModel)
+	apicompat.EnsureAnthropicCompactVisibleText(anthropicResp, &responsesResp)
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -533,6 +534,7 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 	billingModel string,
 	upstreamModel string,
 	startTime time.Time,
+	compactResponse ...bool,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 
@@ -551,6 +553,9 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 	acc.SupplementResponseOutput(finalResponse)
 
 	anthropicResp := apicompat.ResponsesToAnthropic(finalResponse, originalModel)
+	if len(compactResponse) > 0 && compactResponse[0] {
+		apicompat.EnsureAnthropicCompactVisibleText(anthropicResp, finalResponse)
+	}
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)

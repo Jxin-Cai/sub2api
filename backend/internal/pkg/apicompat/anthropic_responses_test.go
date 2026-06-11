@@ -447,6 +447,83 @@ func TestResponsesToAnthropic_EmptyOutput(t *testing.T) {
 	assert.Equal(t, "", anth.Content[0].Text)
 }
 
+func TestResponsesToAnthropic_UsesTopLevelOutputTextWhenOutputEmpty(t *testing.T) {
+	resp := &ResponsesResponse{
+		ID:         "resp_compact",
+		Model:      "gpt-5.2",
+		Status:     "completed",
+		Output:     []ResponsesOutput{},
+		OutputText: "compact summary",
+	}
+
+	anth := ResponsesToAnthropic(resp, "claude-opus-4-6")
+	require.Len(t, anth.Content, 1)
+	assert.Equal(t, "text", anth.Content[0].Type)
+	assert.Equal(t, "compact summary", anth.Content[0].Text)
+}
+
+func TestResponsesToAnthropic_DoesNotDuplicateTopLevelOutputTextWhenMessageTextExists(t *testing.T) {
+	resp := &ResponsesResponse{
+		ID:         "resp_text",
+		Model:      "gpt-5.2",
+		Status:     "completed",
+		OutputText: "answer",
+		Output: []ResponsesOutput{{
+			Type: "message",
+			Content: []ResponsesContentPart{
+				{Type: "output_text", Text: "answer"},
+			},
+		}},
+	}
+
+	anth := ResponsesToAnthropic(resp, "claude-opus-4-6")
+	require.Len(t, anth.Content, 1)
+	assert.Equal(t, "text", anth.Content[0].Type)
+	assert.Equal(t, "answer", anth.Content[0].Text)
+}
+
+func TestEnsureAnthropicCompactVisibleText_UsesReasoningSummary(t *testing.T) {
+	resp := &ResponsesResponse{
+		ID:     "resp_reasoning_compact",
+		Model:  "gpt-5.2",
+		Status: "completed",
+		Output: []ResponsesOutput{{
+			Type: "reasoning",
+			Summary: []ResponsesSummary{
+				{Type: "summary_text", Text: "reasoning compact summary"},
+			},
+		}},
+	}
+
+	anth := ResponsesToAnthropic(resp, "claude-opus-4-6")
+	EnsureAnthropicCompactVisibleText(anth, resp)
+	require.Len(t, anth.Content, 2)
+	assert.Equal(t, "thinking", anth.Content[0].Type)
+	assert.Equal(t, "text", anth.Content[1].Type)
+	assert.Equal(t, "reasoning compact summary", anth.Content[1].Text)
+}
+
+func TestEnsureAnthropicCompactVisibleText_CompactionOnlyGetsSafeFallback(t *testing.T) {
+	resp := &ResponsesResponse{
+		ID:     "resp_compaction",
+		Model:  "gpt-5.2",
+		Status: "completed",
+		Output: []ResponsesOutput{{
+			Type:             "compaction",
+			ID:               "cmp_1",
+			EncryptedContent: "secret-encrypted-state",
+		}},
+	}
+
+	anth := ResponsesToAnthropic(resp, "claude-opus-4-6")
+	EnsureAnthropicCompactVisibleText(anth, resp)
+	require.Len(t, anth.Content, 2)
+	assert.Equal(t, "thinking", anth.Content[0].Type)
+	assert.Equal(t, "text", anth.Content[1].Type)
+	assert.Equal(t, "Conversation compacted.", anth.Content[1].Text)
+	assert.NotContains(t, anth.Content[1].Text, "secret-encrypted-state")
+}
+
 // ---------------------------------------------------------------------------
 // Streaming: ResponsesEventToAnthropicEvents tests
 // ---------------------------------------------------------------------------
@@ -813,12 +890,12 @@ func TestStreamingReasoning(t *testing.T) {
 	assert.Equal(t, "thinking_delta", events[0].Delta.Type)
 	assert.Equal(t, "Let me think...", events[0].Delta.Thinking)
 
-	// reasoning done — closes the thinking block
+	// reasoning summary done without text does not close the block; output_item.done
+	// carries the signature and normal block lifecycle.
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
 		Type: "response.reasoning_summary_text.done",
 	}, state)
-	require.Len(t, events, 1)
-	assert.Equal(t, "content_block_stop", events[0].Type)
+	require.Len(t, events, 0)
 
 	// output_item.done for reasoning — emits signature + keeps block open for lazy close
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
@@ -841,6 +918,68 @@ func TestStreamingReasoning(t *testing.T) {
 	assert.Equal(t, "reasoning", decoded.Type)
 	assert.Equal(t, "enc_data", decoded.EncryptedContent)
 	assert.Equal(t, "rs_abc123", decoded.ID)
+}
+
+func TestResponsesEventToAnthropicEvents_ReasoningSummaryTextDoneFallback(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.added",
+		OutputIndex: 0,
+		Item:        &ResponsesOutput{Type: "reasoning"},
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_start", events[0].Type)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.reasoning_summary_text.done",
+		OutputIndex: 0,
+		Text:        "compact stream summary",
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_delta", events[0].Type)
+	assert.Equal(t, "thinking_delta", events[0].Delta.Type)
+	assert.Equal(t, "compact stream summary", events[0].Delta.Thinking)
+}
+
+func TestResponsesEventToAnthropicEvents_ReasoningSummaryPartDoneFallback(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.reasoning_summary_part.done",
+		OutputIndex: 0,
+		Part:        &ResponsesContentPart{Type: "summary_text", Text: "part summary"},
+	}, state)
+	require.Len(t, events, 2)
+	assert.Equal(t, "content_block_start", events[0].Type)
+	assert.Equal(t, "content_block_delta", events[1].Type)
+	assert.Equal(t, "thinking_delta", events[1].Delta.Type)
+	assert.Equal(t, "part summary", events[1].Delta.Thinking)
+}
+
+func TestResponsesEventToAnthropicEvents_ReasoningSummaryPartDoesNotDuplicateDelta(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.added",
+		OutputIndex: 0,
+		Item:        &ResponsesOutput{Type: "reasoning"},
+	}, state)
+
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.reasoning_summary_text.delta",
+		OutputIndex: 0,
+		Delta:       "summary",
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "thinking_delta", events[0].Delta.Type)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.reasoning_summary_part.done",
+		OutputIndex: 0,
+		Part:        &ResponsesContentPart{Type: "summary_text", Text: "summary"},
+	}, state)
+	assert.Len(t, events, 0)
 }
 
 func TestStreamingIncomplete(t *testing.T) {

@@ -5583,7 +5583,11 @@ func responsesStreamEventMayContributeToOutput(eventType string) bool {
 	case "response.output_text.delta",
 		"response.output_item.added",
 		"response.function_call_arguments.delta",
-		"response.reasoning_summary_text.delta":
+		"response.reasoning_text.delta",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_part.done":
 		return true
 	default:
 		return false

@@ -3,6 +3,7 @@ package apicompat
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -105,6 +106,12 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 		}
 	}
 
+	if !hasNonEmptyAnthropicTextBlock(blocks) {
+		if outputText := strings.TrimSpace(resp.OutputText); outputText != "" {
+			blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: resp.OutputText})
+		}
+	}
+
 	if len(blocks) == 0 {
 		blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: ""})
 	}
@@ -128,6 +135,67 @@ func responsesConversationToAnthropicContainer(conversation *ResponsesConversati
 		return nil
 	}
 	return payload
+}
+
+// EnsureAnthropicCompactVisibleText ensures a compact response carries a visible,
+// non-empty text block for clients that treat an empty assistant text response as
+// a failed compaction. It preserves reasoning/compaction state blocks and never
+// exposes encrypted compaction content as user-visible text.
+func EnsureAnthropicCompactVisibleText(out *AnthropicResponse, source *ResponsesResponse) {
+	if out == nil || hasNonEmptyAnthropicTextBlock(out.Content) {
+		return
+	}
+
+	text := compactVisibleTextFromResponses(source)
+	if text == "" {
+		text = "Conversation compacted."
+	}
+
+	for i := range out.Content {
+		if out.Content[i].Type == "text" && strings.TrimSpace(out.Content[i].Text) == "" {
+			out.Content[i].Text = text
+			return
+		}
+	}
+	out.Content = append(out.Content, AnthropicContentBlock{Type: "text", Text: text})
+}
+
+func hasNonEmptyAnthropicTextBlock(blocks []AnthropicContentBlock) bool {
+	for _, block := range blocks {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func compactVisibleTextFromResponses(resp *ResponsesResponse) string {
+	if resp == nil {
+		return ""
+	}
+	if text := strings.TrimSpace(resp.OutputText); text != "" {
+		return resp.OutputText
+	}
+	for _, item := range resp.Output {
+		switch item.Type {
+		case "message":
+			for _, part := range item.Content {
+				if part.Type == "output_text" && strings.TrimSpace(part.Text) != "" {
+					return part.Text
+				}
+				if part.Type == "refusal" && strings.TrimSpace(part.Refusal) != "" {
+					return part.Refusal
+				}
+			}
+		case "reasoning", "compaction":
+			for _, summary := range item.Summary {
+				if summary.Type == "summary_text" && strings.TrimSpace(summary.Text) != "" {
+					return summary.Text
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func anthropicUsageFromResponsesUsage(usage *ResponsesUsage) AnthropicUsage {
@@ -279,8 +347,12 @@ func ResponsesEventToAnthropicEvents(
 		return resToAnthHandleOutputItemDone(evt, state)
 	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 		return resToAnthHandleReasoningDelta(evt, state)
-	case "response.reasoning_text.done", "response.reasoning_summary_text.done":
+	case "response.reasoning_text.done":
 		return resToAnthHandleBlockDone(state)
+	case "response.reasoning_summary_text.done":
+		return resToAnthHandleReasoningSummaryDone(evt, state)
+	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+		return resToAnthHandleReasoningSummaryPart(evt, state)
 	// response.done 是 Realtime/WS 与项目透传路径使用的终止别名；
 	// 普通 Responses HTTP SSE 的公开终止事件仍以 response.completed 为主。
 	case "response.completed", "response.done", "response.incomplete":
@@ -676,13 +748,27 @@ func resToAnthHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEv
 // Per the reference implementation, this does NOT close the block — it only emits
 // a fallback thinking_delta if no delta was previously sent for this block.
 func resToAnthHandleReasoningSummaryDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
-	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	return resToAnthEmitReasoningSummaryFallback(evt.OutputIndex, evt.Text, state)
+}
+
+func resToAnthHandleReasoningSummaryPart(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	if evt.Part == nil || evt.Part.Type != "summary_text" {
+		return nil
+	}
+	return resToAnthEmitReasoningSummaryFallback(evt.OutputIndex, evt.Part.Text, state)
+}
+
+func resToAnthEmitReasoningSummaryFallback(outputIndex int, text string, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+
+	blockIdx, ok := state.OutputIndexToBlockIdx[outputIndex]
 	if !ok {
-		// Open a thinking block if needed
 		var events []AnthropicStreamEvent
 		events = append(events, closeCurrentBlock(state)...)
 		blockIdx = state.ContentBlockIndex
-		state.OutputIndexToBlockIdx[evt.OutputIndex] = blockIdx
+		state.OutputIndexToBlockIdx[outputIndex] = blockIdx
 		state.ContentBlockOpen = true
 		state.CurrentBlockType = "thinking"
 		events = append(events, AnthropicStreamEvent{
@@ -693,28 +779,30 @@ func resToAnthHandleReasoningSummaryDone(evt *ResponsesStreamEvent, state *Respo
 				Thinking: "",
 			},
 		})
-		if evt.Text != "" && !state.BlockHasDelta[blockIdx] {
+		if !state.BlockHasDelta[blockIdx] {
 			events = append(events, AnthropicStreamEvent{
 				Type:  "content_block_delta",
 				Index: &blockIdx,
 				Delta: &AnthropicDelta{
 					Type:     "thinking_delta",
-					Thinking: evt.Text,
+					Thinking: text,
 				},
 			})
 			state.BlockHasDelta[blockIdx] = true
+			state.HasReasoningDelta = true
 		}
 		return events
 	}
 
-	if evt.Text != "" && !state.BlockHasDelta[blockIdx] {
+	if !state.BlockHasDelta[blockIdx] {
 		state.BlockHasDelta[blockIdx] = true
+		state.HasReasoningDelta = true
 		return []AnthropicStreamEvent{{
 			Type:  "content_block_delta",
 			Index: &blockIdx,
 			Delta: &AnthropicDelta{
 				Type:     "thinking_delta",
-				Thinking: evt.Text,
+				Thinking: text,
 			},
 		}}
 	}

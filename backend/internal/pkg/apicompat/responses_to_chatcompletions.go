@@ -672,6 +672,14 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 		if event.Delta != "" {
 			_, _ = a.reasoning.WriteString(event.Delta)
 		}
+	case "response.reasoning_summary_text.done":
+		if event.Text != "" && a.reasoning.Len() == 0 {
+			_, _ = a.reasoning.WriteString(event.Text)
+		}
+	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+		if event.Part != nil && event.Part.Type == "summary_text" && event.Part.Text != "" && a.reasoning.Len() == 0 {
+			_, _ = a.reasoning.WriteString(event.Part.Text)
+		}
 	}
 }
 
