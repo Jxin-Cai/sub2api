@@ -234,7 +234,7 @@ type ResponsesRequest struct {
 	Stream               bool                `json:"stream,omitempty"`
 	StreamOptions        json.RawMessage     `json:"stream_options,omitempty"`
 	Temperature          *float64            `json:"temperature,omitempty"`
-	Text                 json.RawMessage     `json:"text,omitempty"`
+	Text                 *ResponsesText      `json:"text,omitempty"`
 	ToolChoice           json.RawMessage     `json:"tool_choice,omitempty"`
 	Tools                []ResponsesTool     `json:"tools,omitempty"`
 	TopLogprobs          *int                `json:"top_logprobs,omitempty"`
@@ -260,7 +260,8 @@ type ResponsesReasoning struct {
 
 // ResponsesText configures text output options in the Responses API.
 type ResponsesText struct {
-	Verbosity string `json:"verbosity,omitempty"` // "low" | "medium" | "high"
+	Format    json.RawMessage `json:"format,omitempty"`
+	Verbosity string          `json:"verbosity,omitempty"` // "low" | "medium" | "high"
 }
 
 // ResponsesInputItem is one item in the Responses API input array.

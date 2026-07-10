@@ -766,6 +766,9 @@ func parseUsageAndAccumulate(
 	}
 	cachedResult := gjson.GetBytes(message, "response.usage.input_tokens_details.cached_tokens")
 	cacheCreationResult := gjson.GetBytes(message, "response.usage.input_tokens_details.cache_creation_input_tokens")
+	if !cacheCreationResult.Exists() {
+		cacheCreationResult = gjson.GetBytes(message, "response.usage.cache_creation_input_tokens")
+	}
 	if !cachedResult.Exists() {
 		cachedResult = gjson.GetBytes(message, "response.usage.prompt_tokens_details.cached_tokens")
 	}

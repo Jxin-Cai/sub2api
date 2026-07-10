@@ -42,7 +42,7 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 	out.Store = &storeFalse
 	parallelToolCalls := true
 	out.ParallelToolCalls = &parallelToolCalls
-	out.Text = json.RawMessage(`{"verbosity":"medium"}`)
+	out.Text = &ResponsesText{Verbosity: "medium"}
 
 	if req.MaxTokens > 0 {
 		v := req.MaxTokens
@@ -76,7 +76,7 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 
 	if req.OutputConfig != nil && len(req.OutputConfig.Format) > 0 {
 		format := ensureFormatName(req.OutputConfig.Format)
-		out.Text = json.RawMessage(`{"format":` + string(format) + `}`)
+		out.Text = &ResponsesText{Format: format}
 	}
 
 	// Determine reasoning effort: only output_config.effort controls the
@@ -254,9 +254,9 @@ func anthropicContextManagementEditToResponses(raw json.RawMessage) json.RawMess
 	trigger, _ := edit["trigger"].(map[string]any)
 	value, ok := intValue(trigger["value"])
 	if !ok {
-		return mustMarshalJSON(map[string]any{"type": "compaction"})
+		return mustMarshalRawJSON(map[string]any{"type": "compaction"})
 	}
-	return mustMarshalJSON(map[string]any{"type": "compaction", "compact_threshold": value})
+	return mustMarshalRawJSON(map[string]any{"type": "compaction", "compact_threshold": value})
 }
 
 // parseAnthropicSystemContentParts handles the Anthropic system field which can

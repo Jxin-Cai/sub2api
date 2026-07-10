@@ -1543,7 +1543,8 @@ func TestAnthropicToResponses_OutputConfigFormat(t *testing.T) {
 
 	resp, err := AnthropicToResponses(req)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"format":{"type":"json_schema","name":"weather","schema":{"type":"object"}}}`, string(resp.Text))
+	require.NotNil(t, resp.Text)
+	assert.JSONEq(t, `{"type":"json_schema","name":"weather","schema":{"type":"object"}}`, string(resp.Text.Format))
 	require.NotNil(t, resp.Reasoning)
 	assert.Equal(t, "medium", resp.Reasoning.Effort)
 }
@@ -1588,7 +1589,8 @@ func TestAnthropicToResponses_OutputConfigFormatJsonSchemaMissingName(t *testing
 
 			resp, err := AnthropicToResponses(req)
 			require.NoError(t, err)
-			assert.JSONEq(t, `{"format":{"type":"json_schema","name":"json_response","schema":{"type":"object"}}}`, string(resp.Text))
+			require.NotNil(t, resp.Text)
+			assert.JSONEq(t, `{"type":"json_schema","name":"json_response","schema":{"type":"object"}}`, string(resp.Text.Format))
 		})
 	}
 }
@@ -1984,7 +1986,7 @@ func TestResponsesAnthropicReasoningEnvelope_RoundTripPreservesFields(t *testing
 		MaxTokens: 1024,
 		Messages: []AnthropicMessage{{
 			Role:    "assistant",
-			Content: mustMarshalJSON(anthropic.Content),
+			Content: mustMarshalJSON(t, anthropic.Content),
 		}},
 	})
 	require.NoError(t, err)
@@ -2247,13 +2249,13 @@ func TestAnthropicToResponses_ContextManagementCompaction(t *testing.T) {
 }
 
 func TestResponsesToAnthropicRequest_TextFormatAndEffort(t *testing.T) {
-	text := json.RawMessage(`{"format":{"type":"json_schema","name":"weather","schema":{"type":"object"}}}`)
+	textFormat := json.RawMessage(`{"type":"json_schema","name":"weather","schema":{"type":"object"}}`)
 	maxTokens := 512
 	req := &ResponsesRequest{
 		Model:           "gpt-5.2",
 		Input:           json.RawMessage(`[{"role":"user","content":"Hello"}]`),
 		MaxOutputTokens: &maxTokens,
-		Text:            text,
+		Text:            &ResponsesText{Format: textFormat},
 		Reasoning:       &ResponsesReasoning{Effort: "medium"},
 	}
 
