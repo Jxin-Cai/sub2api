@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -817,6 +818,146 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		return forwardResult, nil
 	}
+}
+
+func (s *OpenAIGatewayService) RetrieveResponse(ctx context.Context, c *gin.Context, account *Account) (*OpenAIForwardResult, error) {
+	startTime := time.Now()
+	if account == nil {
+		return nil, errors.New("account is required")
+	}
+
+	token, _, err := s.GetAccessToken(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+
+	targetURL := ""
+	switch account.Type {
+	case AccountTypeOAuth:
+		targetURL = chatgptCodexURL
+	case AccountTypeAPIKey:
+		baseURL := account.GetOpenAIBaseURL()
+		if baseURL == "" {
+			targetURL = openaiPlatformAPIURL
+		} else {
+			validatedURL, validateErr := s.validateUpstreamBaseURL(baseURL)
+			if validateErr != nil {
+				return nil, validateErr
+			}
+			targetURL = buildOpenAIResponsesURL(validatedURL)
+		}
+	default:
+		targetURL = openaiPlatformAPIURL
+	}
+	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
+	if c != nil && c.Request != nil && c.Request.URL != nil && strings.TrimSpace(c.Request.URL.RawQuery) != "" {
+		targetURL += "?" + c.Request.URL.RawQuery
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	req.Header.Set("authorization", "Bearer "+token)
+
+	if c != nil && c.Request != nil {
+		for key, values := range c.Request.Header {
+			lowerKey := strings.ToLower(key)
+			if openaiAllowedHeaders[lowerKey] {
+				for _, v := range values {
+					req.Header.Add(key, v)
+				}
+			}
+		}
+	}
+	if account.Type == AccountTypeOAuth {
+		req.Host = "chatgpt.com"
+		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, req.Header, account); err != nil {
+			return nil, fmt.Errorf("resolve chatgpt account headers: %w", err)
+		}
+		req.Header.Set("OpenAI-Beta", "responses=experimental")
+		req.Header.Set("originator", resolveOpenAIUpstreamOriginator(c, true))
+		stream := false
+		if c != nil && c.Request != nil && c.Request.URL != nil {
+			stream, _ = strconv.ParseBool(strings.TrimSpace(c.Request.URL.Query().Get("stream")))
+		}
+		if stream {
+			req.Header.Set("accept", "text/event-stream")
+		} else {
+			req.Header.Set("accept", "application/json")
+		}
+	}
+
+	customUA := account.GetOpenAIUserAgent()
+	if customUA != "" {
+		req.Header.Set("user-agent", customUA)
+	}
+	if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
+		req.Header.Set("user-agent", codexCLIUserAgent)
+	}
+	s.overrideBrowserUserAgent(ctx, account, req)
+	account.ApplyHeaderOverrides(req.Header)
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	upstreamStart := time.Now()
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+	if err != nil {
+		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
+	}
+	if resp.StatusCode >= 400 {
+		respBody := s.readUpstreamErrorBody(resp)
+		_ = resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+		upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
+		if s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody) {
+			s.handleFailoverSideEffects(ctx, resp, account, respBody)
+			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody}
+		}
+		return s.handleErrorResponse(ctx, resp, c, account, nil)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	stream := false
+	if c != nil && c.Request != nil && c.Request.URL != nil {
+		stream, _ = strconv.ParseBool(strings.TrimSpace(c.Request.URL.Query().Get("stream")))
+	}
+	var usage *OpenAIUsage
+	var firstTokenMs *int
+	responseID := ""
+	if stream {
+		streamResult, handleErr := s.handleStreamingResponse(ctx, resp, c, account, startTime, "", "")
+		if handleErr != nil {
+			return nil, handleErr
+		}
+		usage = streamResult.usage
+		firstTokenMs = streamResult.firstTokenMs
+		responseID = strings.TrimSpace(streamResult.responseID)
+	} else {
+		nonStreamResult, handleErr := s.handleNonStreamingResponse(ctx, resp, c, account, "", "")
+		if handleErr != nil {
+			return nil, handleErr
+		}
+		usage = nonStreamResult.usage
+		responseID = strings.TrimSpace(nonStreamResult.responseID)
+	}
+	if usage == nil {
+		usage = &OpenAIUsage{}
+	}
+	return &OpenAIForwardResult{
+		RequestID:       resp.Header.Get("x-request-id"),
+		ResponseID:      responseID,
+		Usage:           *usage,
+		Stream:          stream,
+		OpenAIWSMode:    false,
+		ResponseHeaders: resp.Header.Clone(),
+		Duration:        time.Since(startTime),
+		FirstTokenMs:    firstTokenMs,
+	}, nil
 }
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
