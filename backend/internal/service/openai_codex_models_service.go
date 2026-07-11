@@ -34,10 +34,14 @@ type CodexModelsManifest struct {
 // to chase upstream changes. Passing it through keeps the gateway
 // schema-agnostic and always reflects the account's real entitlements.
 func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, account *Account, clientVersion, ifNoneMatch string) (*CodexModelsManifest, error) {
+	return fetchCodexModelsManifest(ctx, s.accountRepo, account, clientVersion, ifNoneMatch)
+}
+
+func fetchCodexModelsManifest(ctx context.Context, accountRepo AccountRepository, account *Account, clientVersion, ifNoneMatch string) (*CodexModelsManifest, error) {
 	if account == nil {
 		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_ACCOUNT_REQUIRED", "account is required")
 	}
-	credAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
+	credAccount, err := resolveCredentialAccount(ctx, accountRepo, account)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_CREDENTIALS_FAILED", "resolve credential account: %v", err)
 	}

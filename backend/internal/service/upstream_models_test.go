@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -114,6 +115,21 @@ func TestExtractUpstreamModelIDs(t *testing.T) {
 			name: "top level array",
 			body: `[{"id":"z-model"},{"name":"models/a-model"}]`,
 			want: []string{"a-model", "z-model"},
+		},
+		{
+			name: "codex manifest slug array",
+			body: `{"models":[{"slug":"gpt-5.5","display_name":"GPT-5.5"},{"slug":"o3"}]}`,
+			want: []string{"gpt-5.5", "o3"},
+		},
+		{
+			name: "id takes precedence over codex slug",
+			body: `{"models":[{"id":"real-id","slug":"slug-id","display_name":"Display"}]}`,
+			want: []string{"real-id"},
+		},
+		{
+			name: "model field fallback",
+			body: `{"models":[{"model":"gpt-5-codex"}]}`,
+			want: []string{"gpt-5-codex"},
 		},
 	}
 
@@ -263,6 +279,69 @@ func TestFetchUpstreamSupportedModelsParsesOpenAIResponse(t *testing.T) {
 	require.Equal(t, []string{"gpt-5", "o3"}, models)
 	require.Equal(t, "https://openai.example.com/v1/models", upstream.lastReq.URL.String())
 	require.Equal(t, "Bearer openai-key", upstream.lastReq.Header.Get("Authorization"))
+}
+
+func TestFetchUpstreamSupportedModelsUsesCodexManifestForOpenAIOAuth(t *testing.T) {
+	var gotAuth, gotAccountID, gotClientVersion string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAccountID = r.Header.Get("chatgpt-account-id")
+		gotClientVersion = r.URL.Query().Get("client_version")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.5"},{"id":"o3"},{"slug":"gpt-5.5"}]}`))
+	}))
+	defer server.Close()
+
+	original := chatgptCodexModelsURL
+	chatgptCodexModelsURL = server.URL
+	defer func() { chatgptCodexModelsURL = original }()
+
+	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
+	models, err := svc.FetchUpstreamSupportedModels(context.Background(), &Account{
+		ID:       7,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":       "test-access-token",
+			"chatgpt_account_id": "acc-123",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"gpt-5.5", "o3"}, models)
+	require.Equal(t, "Bearer test-access-token", gotAuth)
+	require.Equal(t, "acc-123", gotAccountID)
+	require.Equal(t, openAICodexProbeVersion, gotClientVersion)
+}
+
+func TestFetchUpstreamSupportedModelsCodexDoesNotExposeUpstreamBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"SECRET_TOKEN should not be exposed"}`))
+	}))
+	defer server.Close()
+
+	original := chatgptCodexModelsURL
+	chatgptCodexModelsURL = server.URL
+	defer func() { chatgptCodexModelsURL = original }()
+
+	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
+	_, err := svc.FetchUpstreamSupportedModels(context.Background(), &Account{
+		ID:       8,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":       "test-access-token",
+			"chatgpt_account_id": "acc-123",
+		},
+	})
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "SECRET_TOKEN")
+
+	var syncErr *UpstreamModelSyncError
+	require.True(t, errors.As(err, &syncErr))
+	require.Equal(t, UpstreamModelSyncErrorUpstream, syncErr.Kind)
+	require.NotContains(t, syncErr.SafeMessage(), "SECRET_TOKEN")
+	require.Contains(t, syncErr.SafeMessage(), "Failed to request OpenAI Codex models manifest")
 }
 
 func TestFetchUpstreamSupportedModelsDoesNotExposeUpstreamBody(t *testing.T) {

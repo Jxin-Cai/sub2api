@@ -84,6 +84,9 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 	if account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
 		return s.fetchAntigravityOAuthUpstreamModels(ctx, account)
 	}
+	if account.IsOpenAIOAuth() {
+		return s.fetchOpenAICodexUpstreamModels(ctx, account)
+	}
 
 	if s.httpUpstream == nil {
 		return nil, newUpstreamModelSyncConfigError("Upstream HTTP client is not configured", nil)
@@ -332,6 +335,36 @@ func (s *AccountTestService) buildGeminiUpstreamModelsRequest(ctx context.Contex
 	return req, nil
 }
 
+func (s *AccountTestService) fetchOpenAICodexUpstreamModels(ctx context.Context, account *Account) ([]string, error) {
+	credAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
+	if err != nil {
+		return nil, newUpstreamModelSyncConfigError("OpenAI Codex credentials are not available", nil)
+	}
+	if strings.TrimSpace(credAccount.GetOpenAIAccessToken()) == "" {
+		return nil, newUpstreamModelSyncConfigError("No OpenAI Codex access token is available", nil)
+	}
+
+	manifest, err := fetchCodexModelsManifest(ctx, s.accountRepo, account, "", "")
+	if err != nil {
+		return nil, newUpstreamModelSyncUpstreamError(
+			"Failed to request OpenAI Codex models manifest",
+			fmt.Errorf("codex models manifest request failed"),
+		)
+	}
+	if manifest == nil || manifest.NotModified || len(manifest.Body) == 0 {
+		return nil, newUpstreamModelSyncUpstreamError("OpenAI Codex models manifest returned no supported models", nil)
+	}
+
+	models, err := extractUpstreamModelIDs(manifest.Body)
+	if err != nil {
+		return nil, newUpstreamModelSyncUpstreamError("OpenAI Codex models manifest was not valid JSON", err)
+	}
+	if len(models) == 0 {
+		return nil, newUpstreamModelSyncUpstreamError("OpenAI Codex models manifest returned no supported models", nil)
+	}
+	return models, nil
+}
+
 func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Context, account *Account) ([]string, error) {
 	if s.antigravityGatewayService == nil || s.antigravityGatewayService.GetTokenProvider() == nil {
 		return nil, newUpstreamModelSyncConfigError("Antigravity token provider is not configured", nil)
@@ -406,8 +439,10 @@ func buildGeminiModelsURL(base string) string {
 }
 
 type upstreamModelEntry struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID    string `json:"id"`
+	Slug  string `json:"slug"`
+	Name  string `json:"name"`
+	Model string `json:"model"`
 }
 
 func extractUpstreamModelIDs(body []byte) ([]string, error) {
@@ -451,7 +486,13 @@ func extractUpstreamModelIDs(body []byte) ([]string, error) {
 func upstreamModelEntryID(entry upstreamModelEntry) string {
 	modelID := strings.TrimSpace(entry.ID)
 	if modelID == "" {
+		modelID = strings.TrimSpace(entry.Slug)
+	}
+	if modelID == "" {
 		modelID = strings.TrimSpace(entry.Name)
+	}
+	if modelID == "" {
+		modelID = strings.TrimSpace(entry.Model)
 	}
 	return strings.TrimPrefix(modelID, "models/")
 }
