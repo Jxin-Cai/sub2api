@@ -79,6 +79,9 @@ func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) 
 
 	sessionID := explicitOpenAISessionID(c, body)
 	if sessionID == "" && len(body) > 0 {
+		sessionID = deriveOpenAIReasoningSessionSeed(body)
+	}
+	if sessionID == "" && len(body) > 0 {
 		sessionID = deriveOpenAIContentSessionSeed(body)
 	}
 	if sessionID == "" {

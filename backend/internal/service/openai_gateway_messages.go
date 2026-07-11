@@ -550,7 +550,10 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 		return nil, fmt.Errorf("upstream stream ended without terminal event")
 	}
 
-	if strings.TrimSpace(finalResponse.Status) == "failed" {
+	// Some compatibility bridges emit response.failed with a usable output and
+	// no error object. Preserve that legacy terminal response, but keep the
+	// failover/error path for genuine failed responses carrying an error.
+	if strings.TrimSpace(finalResponse.Status) == "failed" && finalResponse.Error != nil {
 		payload, _ := json.Marshal(gin.H{"type": "response.failed", "response": finalResponse})
 		if hit, code, msg := detectOpenAICyberPolicy(payload); hit {
 			MarkOpsCyberPolicy(c, CyberPolicyMark{

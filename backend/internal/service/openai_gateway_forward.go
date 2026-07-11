@@ -825,79 +825,17 @@ func (s *OpenAIGatewayService) RetrieveResponse(ctx context.Context, c *gin.Cont
 	if account == nil {
 		return nil, errors.New("account is required")
 	}
+	stream := openAIResponsesRetrieveStreams(c)
 
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
 		return nil, err
 	}
 
-	targetURL := ""
-	switch account.Type {
-	case AccountTypeOAuth:
-		targetURL = chatgptCodexURL
-	case AccountTypeAPIKey:
-		baseURL := account.GetOpenAIBaseURL()
-		if baseURL == "" {
-			targetURL = openaiPlatformAPIURL
-		} else {
-			validatedURL, validateErr := s.validateUpstreamBaseURL(baseURL)
-			if validateErr != nil {
-				return nil, validateErr
-			}
-			targetURL = buildOpenAIResponsesURL(validatedURL)
-		}
-	default:
-		targetURL = openaiPlatformAPIURL
-	}
-	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
-	if c != nil && c.Request != nil && c.Request.URL != nil && strings.TrimSpace(c.Request.URL.RawQuery) != "" {
-		targetURL += "?" + c.Request.URL.RawQuery
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	req, err := s.buildUpstreamRequestOpenAIPassthrough(ctx, c, account, nil, token)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
-	req.Header.Set("authorization", "Bearer "+token)
-
-	if c != nil && c.Request != nil {
-		for key, values := range c.Request.Header {
-			lowerKey := strings.ToLower(key)
-			if openaiAllowedHeaders[lowerKey] {
-				for _, v := range values {
-					req.Header.Add(key, v)
-				}
-			}
-		}
-	}
-	if account.Type == AccountTypeOAuth {
-		req.Host = "chatgpt.com"
-		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, req.Header, account); err != nil {
-			return nil, fmt.Errorf("resolve chatgpt account headers: %w", err)
-		}
-		req.Header.Set("OpenAI-Beta", "responses=experimental")
-		req.Header.Set("originator", resolveOpenAIUpstreamOriginator(c, true))
-		stream := false
-		if c != nil && c.Request != nil && c.Request.URL != nil {
-			stream, _ = strconv.ParseBool(strings.TrimSpace(c.Request.URL.Query().Get("stream")))
-		}
-		if stream {
-			req.Header.Set("accept", "text/event-stream")
-		} else {
-			req.Header.Set("accept", "application/json")
-		}
-	}
-
-	customUA := account.GetOpenAIUserAgent()
-	if customUA != "" {
-		req.Header.Set("user-agent", customUA)
-	}
-	if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
-		req.Header.Set("user-agent", codexCLIUserAgent)
-	}
-	s.overrideBrowserUserAgent(ctx, account, req)
-	account.ApplyHeaderOverrides(req.Header)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
@@ -907,30 +845,22 @@ func (s *OpenAIGatewayService) RetrieveResponse(ctx context.Context, c *gin.Cont
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
-		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
-	}
-	if resp.StatusCode >= 400 {
-		respBody := s.readUpstreamErrorBody(resp)
-		_ = resp.Body.Close()
-		resp.Body = io.NopCloser(bytes.NewReader(respBody))
-		upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
-		if s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody) {
-			s.handleFailoverSideEffects(ctx, resp, account, respBody)
-			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody}
-		}
-		return s.handleErrorResponse(ctx, resp, c, account, nil)
+		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	stream := false
-	if c != nil && c.Request != nil && c.Request.URL != nil {
-		stream, _ = strconv.ParseBool(strings.TrimSpace(c.Request.URL.Query().Get("stream")))
+	if resp.StatusCode >= 400 {
+		if shouldFailoverOpenAIPassthroughResponse(resp.StatusCode) {
+			return nil, s.handleFailoverErrorResponsePassthrough(ctx, resp, c, account, nil)
+		}
+		return nil, s.handleErrorResponsePassthrough(ctx, resp, c, account, nil)
 	}
+
 	var usage *OpenAIUsage
 	var firstTokenMs *int
 	responseID := ""
 	if stream {
-		streamResult, handleErr := s.handleStreamingResponse(ctx, resp, c, account, startTime, "", "")
+		streamResult, handleErr := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime, "", "")
 		if handleErr != nil {
 			return nil, handleErr
 		}
@@ -938,12 +868,18 @@ func (s *OpenAIGatewayService) RetrieveResponse(ctx context.Context, c *gin.Cont
 		firstTokenMs = streamResult.firstTokenMs
 		responseID = strings.TrimSpace(streamResult.responseID)
 	} else {
-		nonStreamResult, handleErr := s.handleNonStreamingResponse(ctx, resp, c, account, "", "")
+		nonStreamResult, handleErr := s.handleNonStreamingResponsePassthrough(ctx, resp, c, "", "")
 		if handleErr != nil {
 			return nil, handleErr
 		}
 		usage = nonStreamResult.usage
 		responseID = strings.TrimSpace(nonStreamResult.responseID)
+	}
+	s.bindHTTPResponseAccount(ctx, c, account, responseID)
+	if !account.IsShadow() {
+		if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
+			s.updateCodexUsageSnapshot(ctx, account.ID, snapshot)
+		}
 	}
 	if usage == nil {
 		usage = &OpenAIUsage{}
@@ -960,7 +896,21 @@ func (s *OpenAIGatewayService) RetrieveResponse(ctx context.Context, c *gin.Cont
 	}, nil
 }
 
+func openAIResponsesRetrieveStreams(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	stream, err := strconv.ParseBool(strings.TrimSpace(c.Request.URL.Query().Get("stream")))
+	return err == nil && stream
+}
+
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
+	if sanitizedBody, _, err := sanitizeOpenAIResponsesRequestBody(body); err != nil {
+		return nil, fmt.Errorf("sanitize responses request: %w", err)
+	} else {
+		body = sanitizedBody
+	}
+
 	// Determine target URL based on account type
 	var targetURL string
 	switch account.Type {

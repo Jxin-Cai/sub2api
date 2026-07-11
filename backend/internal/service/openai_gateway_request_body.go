@@ -131,20 +131,15 @@ func sanitizeEncryptedReasoningInputItem(item any) (next any, changed bool, keep
 	}
 
 	itemType, _ := inputItem["type"].(string)
-	if strings.TrimSpace(itemType) != "reasoning" {
-		return item, false, true
-	}
-
-	_, hasEncryptedContent := inputItem["encrypted_content"]
-	if !hasEncryptedContent {
-		return item, false, true
-	}
-
-	delete(inputItem, "encrypted_content")
-	if len(inputItem) == 1 {
+	switch strings.TrimSpace(itemType) {
+	case "reasoning", "compaction":
+		if _, hasEncryptedContent := inputItem["encrypted_content"]; !hasEncryptedContent {
+			return item, false, true
+		}
 		return nil, true, false
+	default:
+		return item, false, true
 	}
-	return inputItem, true, true
 }
 
 func IsOpenAIResponsesCompactPathForTest(c *gin.Context) bool {
@@ -188,6 +183,7 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 		"reasoning",
 		"text",
 		"previous_response_id",
+		"context_management",
 	} {
 		value := gjson.GetBytes(body, field)
 		if !value.Exists() {
@@ -200,10 +196,14 @@ func normalizeOpenAICompactRequestBody(body []byte) ([]byte, bool, error) {
 		normalized = next
 	}
 
-	if bytes.Equal(bytes.TrimSpace(body), bytes.TrimSpace(normalized)) {
+	sanitized, _, err := sanitizeOpenAIResponsesRequestBody(normalized)
+	if err != nil {
+		return body, false, err
+	}
+	if bytes.Equal(bytes.TrimSpace(body), bytes.TrimSpace(sanitized)) {
 		return body, false, nil
 	}
-	return normalized, true, nil
+	return sanitized, true, nil
 }
 
 func resolveOpenAICompactSessionID(c *gin.Context) string {
@@ -1159,7 +1159,7 @@ func normalizeOpenAIReasoningEffort(raw string) string {
 
 	switch value {
 	case "none", "minimal":
-		return ""
+		return "none"
 	case "low", "medium", "high":
 		return value
 	case "xhigh", "extrahigh", "max":

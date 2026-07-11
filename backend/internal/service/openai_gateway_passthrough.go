@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -299,6 +300,12 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	body []byte,
 	token string,
 ) (*http.Request, error) {
+	if sanitizedBody, _, err := sanitizeOpenAIResponsesRequestBody(body); err != nil {
+		return nil, fmt.Errorf("sanitize passthrough responses request: %w", err)
+	} else {
+		body = sanitizedBody
+	}
+
 	targetURL := openaiPlatformAPIURL
 	switch account.Type {
 	case AccountTypeOAuth:
@@ -315,7 +322,27 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	}
 	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	method := http.MethodPost
+	if c != nil && c.Request != nil {
+		if candidate := strings.TrimSpace(c.Request.Method); candidate != "" {
+			method = candidate
+		}
+		if c.Request.URL != nil {
+			if rawQuery := strings.TrimSpace(c.Request.URL.RawQuery); rawQuery != "" {
+				separator := "?"
+				if strings.Contains(targetURL, "?") {
+					separator = "&"
+				}
+				targetURL += separator + rawQuery
+			}
+		}
+	}
+
+	var requestBody io.Reader
+	if method != http.MethodGet && method != http.MethodHead {
+		requestBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, requestBody)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +379,13 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 		// 先保存客户端原始值，再做 compact 补充，避免后续统一隔离时读到已处理的值。
 		clientSessionID := strings.TrimSpace(req.Header.Get("session_id"))
 		clientConversationID := strings.TrimSpace(req.Header.Get("conversation_id"))
-		if isOpenAIResponsesCompactPath(c) {
+		if method == http.MethodGet || method == http.MethodHead {
+			if openAIResponsesRetrieveStreams(c) {
+				req.Header.Set("accept", "text/event-stream")
+			} else {
+				req.Header.Set("accept", "application/json")
+			}
+		} else if isOpenAIResponsesCompactPath(c) {
 			req.Header.Set("accept", "application/json")
 			if req.Header.Get("version") == "" {
 				req.Header.Set("version", codexCLIVersion)
@@ -401,7 +434,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// （Chrome/Firefox/Safari/Edge 等），替换为后台配置的 Codex UA，避免 Cloudflare 触发 JS 质询。
 	s.overrideBrowserUserAgent(ctx, account, req)
 
-	if req.Header.Get("content-type") == "" {
+	if method != http.MethodGet && method != http.MethodHead && req.Header.Get("content-type") == "" {
 		req.Header.Set("content-type", "application/json")
 	}
 
