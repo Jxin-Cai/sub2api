@@ -828,8 +828,6 @@ export async function createSparkShadow(parentId: number, payload: SparkShadowCr
   const { data } = await apiClient.post<Account>(`/admin/accounts/${parentId}/shadow`, payload)
   return data
 }
-  return data
-}
 
 export const accountsAPI = {
   list,

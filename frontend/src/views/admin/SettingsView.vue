@@ -4112,6 +4112,8 @@
                       </div>
                     </div>
                   </div>
+                </div>
+              </div>
               <div
                 v-if="form.openai_advanced_scheduler_enabled"
                 class="flex items-center justify-between border-t border-gray-100 pt-5 dark:border-dark-700"
@@ -9149,6 +9151,8 @@ function normalizeOpenAIModelPriorityRulesForSave(): OpenAIModelPriorityRule[] |
   }
 
   return normalized;
+}
+
 // ── codex_cli_only 黑/白名单结构化编辑（行 ↔ JSON）──
 interface CodexClientRow {
   originator: string;
