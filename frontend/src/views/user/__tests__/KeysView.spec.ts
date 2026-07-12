@@ -282,6 +282,7 @@ describe('user KeysView column settings', () => {
     const wrapper = await mountView()
 
     expect(visibleColumnKeys(wrapper)).toEqual([
+      'id',
       'name',
       'key',
       'group',
@@ -336,6 +337,7 @@ describe('user KeysView column settings', () => {
     const wrapper = await mountView()
 
     expect(visibleColumnKeys(wrapper)).toEqual([
+      'id',
       'name',
       'key',
       'current_concurrency',

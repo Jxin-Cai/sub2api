@@ -124,6 +124,46 @@ func trimOpenAIEncryptedReasoningItems(reqBody map[string]any) bool {
 	}
 }
 
+func trimOpenAIEncryptedReasoningItemsFromBody(body []byte) ([]byte, bool, error) {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() {
+		return body, false, nil
+	}
+	shouldDrop := func(item gjson.Result) bool {
+		typ := strings.TrimSpace(item.Get("type").String())
+		return (typ == "reasoning" || typ == "compaction") && item.Get("encrypted_content").Exists()
+	}
+	if input.IsObject() {
+		if !shouldDrop(input) {
+			return body, false, nil
+		}
+		trimmed, err := sjson.DeleteBytes(body, "input")
+		return trimmed, err == nil, err
+	}
+	if !input.IsArray() {
+		return body, false, nil
+	}
+	items := input.Array()
+	indices := make([]int, 0, len(items))
+	for i, item := range items {
+		if shouldDrop(item) {
+			indices = append(indices, i)
+		}
+	}
+	if len(indices) == 0 {
+		return body, false, nil
+	}
+	trimmed := body
+	for i := len(indices) - 1; i >= 0; i-- {
+		var err error
+		trimmed, err = sjson.DeleteBytes(trimmed, fmt.Sprintf("input.%d", indices[i]))
+		if err != nil {
+			return body, false, err
+		}
+	}
+	return trimmed, true, nil
+}
+
 func sanitizeEncryptedReasoningInputItem(item any) (next any, changed bool, keep bool) {
 	inputItem, ok := item.(map[string]any)
 	if !ok {

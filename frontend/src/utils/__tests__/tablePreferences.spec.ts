@@ -43,7 +43,7 @@ describe('tablePreferences', () => {
   it('normalizes invalid options without rewriting the configured default itself', () => {
     window.__APP_CONFIG__ = {
       table_default_page_size: 35,
-      table_page_size_options: [1001, 50, 10, 10, 2, 0]
+      table_page_size_options: [5001, 50, 10, 10, 2, 0]
     } as any
 
     expect(getConfiguredTableDefaultPageSize()).toBe(35)
@@ -64,11 +64,11 @@ describe('tablePreferences', () => {
     expect(normalizeTablePageSize(undefined)).toBe(20)
   })
 
-  it('keeps built-in selectable defaults at 10, 20, 50, 100', () => {
+  it('keeps the expanded built-in selectable defaults', () => {
     window.__APP_CONFIG__ = {
       table_default_page_size: 1000
     } as any
 
-    expect(getConfiguredTablePageSizeOptions()).toEqual([10, 20, 50, 100])
+    expect(getConfiguredTablePageSizeOptions()).toEqual([20, 50, 100, 500, 1000, 5000])
   })
 })

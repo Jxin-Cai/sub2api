@@ -93,6 +93,7 @@ const (
 var openAIChatGPTInternalUnsupportedFields = []string{
 	"user",
 	"metadata",
+	"prompt_cache_breakpoint",
 	"prompt_cache_retention",
 	"safety_identifier",
 	"stream_options",
@@ -212,7 +213,7 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 
 	if v, ok := reqBody["prompt_cache_key"].(string); ok {
 		result.PromptCacheKey = strings.TrimSpace(v)
-		if isOpenAICompatMessagesBridgeRequestBody(reqBody) {
+		if opts.IsCompact || isOpenAICompatMessagesBridgeRequestBody(reqBody) {
 			delete(reqBody, "prompt_cache_key")
 			result.Modified = true
 		}

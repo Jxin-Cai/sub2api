@@ -195,7 +195,16 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 		upstreamReq, err = buildGrokResponsesRequest(upstreamCtx, c, account, body, token)
 	} else {
-		upstreamReq, err = s.buildUpstreamRequestOpenAIPassthrough(upstreamCtx, c, account, body, token)
+		bridgeContext := c
+		if c != nil && c.Request != nil {
+			bridgeContext = c.Copy()
+			bridgeContext.Request = c.Request.Clone(c.Request.Context())
+			bridgeContext.Request.Method = http.MethodPost
+			if bridgeContext.Request.URL != nil {
+				bridgeContext.Request.URL.RawQuery = ""
+			}
+		}
+		upstreamReq, err = s.buildUpstreamRequestOpenAIPassthrough(upstreamCtx, bridgeContext, account, body, token)
 	}
 	releaseUpstreamCtx()
 	if err != nil {

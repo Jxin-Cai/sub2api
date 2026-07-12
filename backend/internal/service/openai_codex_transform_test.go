@@ -1238,12 +1238,13 @@ func TestApplyCodexOAuthTransform_StripsPromptCacheRetention(t *testing.T) {
 
 func TestApplyCodexOAuthTransform_StripsChatGPTInternalUnsupportedFields(t *testing.T) {
 	reqBody := map[string]any{
-		"model":                  "gpt-5.4",
-		"user":                   "user_123",
-		"metadata":               map[string]any{"trace_id": "abc"},
-		"prompt_cache_retention": "24h",
-		"safety_identifier":      "sid",
-		"stream_options":         map[string]any{"include_usage": true},
+		"model":                   "gpt-5.4",
+		"user":                    "user_123",
+		"metadata":                map[string]any{"trace_id": "abc"},
+		"prompt_cache_breakpoint": "cache-prefix",
+		"prompt_cache_retention":  "24h",
+		"safety_identifier":       "sid",
+		"stream_options":          map[string]any{"include_usage": true},
 		"input": []any{
 			map[string]any{"role": "user", "content": "hi"},
 		},

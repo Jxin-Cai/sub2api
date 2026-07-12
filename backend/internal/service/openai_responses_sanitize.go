@@ -382,6 +382,15 @@ func sanitizeOpenAIResponsesToolChoice(value any) (any, bool, bool) {
 		}
 	case map[string]any:
 		typ := strings.TrimSpace(stringValueFromAny(v["type"]))
+		if typ == "image_generation" {
+			normalized := map[string]any{"type": "image_generation"}
+			encodedOld, _ := json.Marshal(v)
+			encodedNew, _ := json.Marshal(normalized)
+			if string(encodedOld) == string(encodedNew) {
+				return value, false, true
+			}
+			return normalized, true, true
+		}
 		if typ != "function" {
 			return nil, true, false
 		}

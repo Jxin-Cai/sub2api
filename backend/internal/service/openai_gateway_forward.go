@@ -190,6 +190,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	upstreamModel := billingModel
 	isCompactRequest := isOpenAIResponsesCompactPath(c)
+	if isCompactRequest {
+		// Compact always returns a buffered JSON response. The client may include
+		// stream=true in a generic Responses payload, but that field is stripped
+		// before forwarding and must not select the SSE response handler.
+		reqStream = false
+	}
 	compactMapped := false
 	if isCompactRequest {
 		compactMappedModel := resolveOpenAICompactForwardModel(account, billingModel)
@@ -701,15 +707,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamCode := extractUpstreamErrorCode(respBody)
 			if !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && upstreamCode == "invalid_encrypted_content" {
-				decoded, decodeErr := ensureReqBody()
-				if decodeErr != nil {
-					return nil, decodeErr
+				trimmedBody, trimmed, trimErr := trimOpenAIEncryptedReasoningItemsFromBody(body)
+				if trimErr != nil {
+					return nil, fmt.Errorf("trim invalid_encrypted_content retry body: %w", trimErr)
 				}
-				if trimOpenAIEncryptedReasoningItems(decoded) {
-					body, err = marshalOpenAIUpstreamJSON(decoded)
-					if err != nil {
-						return nil, fmt.Errorf("serialize invalid_encrypted_content retry body: %w", err)
-					}
+				if trimmed {
+					body = trimmedBody
 					httpInvalidEncryptedContentRetryTried = true
 					logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying non-WSv2 request once after invalid_encrypted_content (account: %s)", account.Name)
 					continue

@@ -560,8 +560,8 @@ func normalizeOpenAIImageSizeTier(size string) string {
 }
 
 const (
-	openAIImage2KMaxPixels  = 2560 * 1440
-	openAIImageMinPixels    = 1024 * 1024
+	openAIImage2KMaxPixels = 2560 * 1440
+	openAIImageMinPixels   = 1024 * 1024
 )
 
 func isOpenAIImageSizeBelowMinimum(size string) bool {
@@ -619,7 +619,14 @@ func parseOpenAIImageSizeDimensions(size string) (int, int, bool) {
 }
 
 func classifyUnknownOpenAIImageSizeTier(width int, height int) string {
-	if height > 0 && width > openAIImage2KMaxPixels/height {
+	if width <= 0 || height <= 0 {
+		return "2K"
+	}
+	maxDimension := max(width, height)
+	if maxDimension <= 1024 {
+		return "1K"
+	}
+	if maxDimension >= 2560 {
 		return "4K"
 	}
 	return "2K"

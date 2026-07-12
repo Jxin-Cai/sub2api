@@ -2581,6 +2581,46 @@ func TestOpenAIBuildUpstreamRequestOpenAIPassthroughPreservesCompactPath(t *test
 	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(req.Context()))
 }
 
+func TestOpenAIBuildUpstreamRequestsStripPromptCacheBreakpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-5.6-sol","stream":true,"prompt_cache_breakpoint":"cache-prefix","input":"hello"}`)
+	account := &Account{
+		Type:        AccountTypeOAuth,
+		Credentials: map[string]any{"chatgpt_account_id": "chatgpt-acc"},
+	}
+
+	for _, tc := range []struct {
+		name  string
+		build func(*OpenAIGatewayService, *gin.Context) (*http.Request, error)
+	}{
+		{
+			name: "normal",
+			build: func(svc *OpenAIGatewayService, c *gin.Context) (*http.Request, error) {
+				return svc.buildUpstreamRequest(c.Request.Context(), c, account, body, "token", true, "", true)
+			},
+		},
+		{
+			name: "passthrough",
+			build: func(svc *OpenAIGatewayService, c *gin.Context) (*http.Request, error) {
+				return svc.buildUpstreamRequestOpenAIPassthrough(c.Request.Context(), c, account, body, "token")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+
+			req, err := tc.build(&OpenAIGatewayService{}, c)
+			require.NoError(t, err)
+			upstreamBody, err := io.ReadAll(req.Body)
+			require.NoError(t, err)
+			require.False(t, gjson.GetBytes(upstreamBody, "prompt_cache_breakpoint").Exists())
+			require.Equal(t, "gpt-5.6-sol", gjson.GetBytes(upstreamBody, "model").String())
+		})
+	}
+}
+
 func TestOpenAIBuildUpstreamRequestCompactForcesJSONAcceptForOAuth(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
