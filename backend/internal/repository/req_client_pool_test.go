@@ -20,6 +20,18 @@ func forceHTTPVersion(t *testing.T, client *req.Client) string {
 	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().String()
 }
 
+func TestGetSharedReqClient_DirectDisablesEnvironmentProxy(t *testing.T) {
+	sharedReqClients = sync.Map{}
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:7897")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+	t.Setenv("ALL_PROXY", "http://127.0.0.1:7897")
+
+	client, err := getSharedReqClient(reqClientOptions{Timeout: time.Second})
+
+	require.NoError(t, err)
+	require.Nil(t, client.GetTransport().Proxy)
+}
+
 func TestGetSharedReqClient_ForceHTTP2SeparatesCache(t *testing.T) {
 	sharedReqClients = sync.Map{}
 	base := reqClientOptions{

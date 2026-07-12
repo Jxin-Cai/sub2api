@@ -56,6 +56,8 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 	}
 	if trimmed != "" {
 		client.SetProxyURL(trimmed)
+	} else {
+		client.SetProxy(nil)
 	}
 
 	actual, _ := sharedReqClients.LoadOrStore(key, client)
