@@ -2656,18 +2656,54 @@ func TestOpenAIForwardOAuthRetriesPromptCacheBreakpointWithoutCacheFields(t *tes
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
-	body := []byte(`{"model":"gpt-5.6-sol","stream":false,"prompt_cache_key":"cache-key","prompt_cache_breakpoint":"legacy-key","input":"hello"}`)
+	// Use a model that normally supports prompt caching so this specifically
+	// exercises the error-driven fallback instead of GPT-5.6's proactive strip.
+	body := []byte(`{"model":"gpt-5.5","stream":false,"prompt_cache_key":"cache-key","prompt_cache_breakpoint":"legacy-key","input":"hello"}`)
 
 	result, err := svc.Forward(context.Background(), c, account, body)
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Len(t, upstream.bodies, 2)
-	for _, sentBody := range upstream.bodies {
-		require.False(t, gjson.GetBytes(sentBody, "prompt_cache_key").Exists())
-		require.False(t, gjson.GetBytes(sentBody, "prompt_cache_breakpoint").Exists())
-	}
+	require.Equal(t, "cache-key", gjson.GetBytes(upstream.bodies[0], "prompt_cache_key").String())
+	require.False(t, gjson.GetBytes(upstream.bodies[0], "prompt_cache_breakpoint").Exists())
 	require.NotEmpty(t, upstream.requests[0].Header.Get("Session_Id"))
+	require.NotEmpty(t, upstream.requests[0].Header.Get("Conversation_Id"))
+	require.False(t, gjson.GetBytes(upstream.bodies[1], "prompt_cache_key").Exists())
+	require.False(t, gjson.GetBytes(upstream.bodies[1], "prompt_cache_breakpoint").Exists())
+	require.Empty(t, upstream.requests[1].Header.Get("Session_Id"))
+	require.Empty(t, upstream.requests[1].Header.Get("Conversation_Id"))
+}
+
+func TestOpenAIForwardOAuthGPT56SuppressesPromptCacheHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"usage":{"input_tokens":1,"output_tokens":1}}`)),
+	}}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	account := &Account{
+		ID: 620, Name: "openai-oauth-gpt56", Platform: PlatformOpenAI,
+		Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-account",
+		},
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
+	body := []byte(`{"model":"gpt-5.6-sol","stream":false,"prompt_cache_key":"cache-key","input":"hello"}`)
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, upstream.bodies, 1)
+	require.False(t, gjson.GetBytes(upstream.bodies[0], "prompt_cache_key").Exists())
+	require.Empty(t, upstream.requests[0].Header.Get("Session_Id"))
+	require.Empty(t, upstream.requests[0].Header.Get("Conversation_Id"))
 }
 
 func TestOpenAIBuildUpstreamRequestCompactForcesJSONAcceptForOAuth(t *testing.T) {

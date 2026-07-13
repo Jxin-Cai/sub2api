@@ -693,6 +693,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 	httpInvalidEncryptedContentRetryTried := false
 	httpPromptCacheBreakpointRetryTried := false
+	// GPT-5.6 rejects not only the public prompt_cache_key body field on the
+	// ChatGPT HTTP endpoint, but also the session/conversation headers derived
+	// from it (reported upstream as prompt_cache_breakpoint). The OAuth
+	// transform has already removed the body field; suppress its header form as
+	// well. Keep the value on the websocket path, where it is session metadata.
+	if account.Type == AccountTypeOAuth && isOpenAIGPT56Model(upstreamModel) {
+		promptCacheKey = ""
+	}
 	for {
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
@@ -743,6 +751,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				}
 				httpPromptCacheBreakpointRetryTried = true
 				body = trimmedBody
+				// buildUpstreamRequest derives session_id and conversation_id from
+				// promptCacheKey independently of the JSON body. Clearing only the
+				// body would therefore resend the same rejected cache breakpoint.
+				promptCacheKey = ""
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying OAuth request once without prompt cache fields after prompt_cache_breakpoint rejection (account: %s)", account.Name)
 				continue
 			}
