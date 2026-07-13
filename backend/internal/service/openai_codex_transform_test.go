@@ -1340,6 +1340,36 @@ func TestApplyCodexOAuthTransform_StripsPromptCacheRetention(t *testing.T) {
 		"prompt_cache_retention must be stripped before forwarding to Codex upstream")
 }
 
+func TestApplyCodexOAuthTransform_StripsGPT56PromptCacheKeyFromBody(t *testing.T) {
+	reqBody := map[string]any{
+		"model":            "gpt-5.6-sol",
+		"prompt_cache_key": "session-cache-key",
+		"input": []any{
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	}
+
+	result := applyCodexOAuthTransform(reqBody, true, false)
+
+	require.Equal(t, "session-cache-key", result.PromptCacheKey)
+	require.NotContains(t, reqBody, "prompt_cache_key")
+}
+
+func TestApplyCodexOAuthTransform_PreservesSupportedPromptCacheKey(t *testing.T) {
+	reqBody := map[string]any{
+		"model":            "gpt-5.4",
+		"prompt_cache_key": "session-cache-key",
+		"input": []any{
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	}
+
+	result := applyCodexOAuthTransform(reqBody, true, false)
+
+	require.Equal(t, "session-cache-key", result.PromptCacheKey)
+	require.Equal(t, "session-cache-key", reqBody["prompt_cache_key"])
+}
+
 func TestApplyCodexOAuthTransform_StripsChatGPTInternalUnsupportedFields(t *testing.T) {
 	reqBody := map[string]any{
 		"model":                   "gpt-5.4",

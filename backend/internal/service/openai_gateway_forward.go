@@ -16,6 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // Forward forwards request to OpenAI API
@@ -691,6 +692,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	httpInvalidEncryptedContentRetryTried := false
+	httpPromptCacheBreakpointRetryTried := false
 	for {
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
@@ -726,6 +728,24 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamCode := extractUpstreamErrorCode(respBody)
+			upstreamParam := strings.ToLower(strings.TrimSpace(gjson.GetBytes(respBody, "error.param").String()))
+			if !httpPromptCacheBreakpointRetryTried &&
+				account.Type == AccountTypeOAuth &&
+				resp.StatusCode == http.StatusBadRequest &&
+				upstreamParam == "prompt_cache_breakpoint" {
+				trimmedBody, trimErr := sjson.DeleteBytes(body, "prompt_cache_key")
+				if trimErr != nil {
+					return nil, fmt.Errorf("strip prompt cache key retry body: %w", trimErr)
+				}
+				trimmedBody, trimErr = sjson.DeleteBytes(trimmedBody, "prompt_cache_breakpoint")
+				if trimErr != nil {
+					return nil, fmt.Errorf("strip prompt cache breakpoint retry body: %w", trimErr)
+				}
+				httpPromptCacheBreakpointRetryTried = true
+				body = trimmedBody
+				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying OAuth request once without prompt cache fields after prompt_cache_breakpoint rejection (account: %s)", account.Name)
+				continue
+			}
 			if !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && upstreamCode == "invalid_encrypted_content" {
 				trimmedBody, trimmed, trimErr := trimOpenAIEncryptedReasoningItemsFromBody(body)
 				if trimErr != nil {

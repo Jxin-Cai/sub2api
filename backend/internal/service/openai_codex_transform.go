@@ -213,7 +213,12 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 
 	if v, ok := reqBody["prompt_cache_key"].(string); ok {
 		result.PromptCacheKey = strings.TrimSpace(v)
-		if opts.IsCompact || isOpenAICompatMessagesBridgeRequestBody(reqBody) {
+		// GPT-5.6 rejects the cache key on the ChatGPT internal HTTP endpoint.
+		// The upstream error names its internal representation
+		// (prompt_cache_breakpoint), even though the wire request contains the
+		// public Responses field prompt_cache_key. Keep the value in result so
+		// callers can still derive isolated session/conversation headers.
+		if opts.IsCompact || isOpenAIGPT56Model(normalizedModel) || isOpenAICompatMessagesBridgeRequestBody(reqBody) {
 			delete(reqBody, "prompt_cache_key")
 			result.Modified = true
 		}
