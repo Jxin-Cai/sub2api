@@ -101,6 +101,7 @@ func sanitizeOpenAIResponsesRequestMap(reqBody map[string]any) bool {
 	if len(reqBody) == 0 {
 		return false
 	}
+	model := stringValueFromAny(reqBody["model"])
 
 	modified := false
 	for key := range reqBody {
@@ -138,7 +139,7 @@ func sanitizeOpenAIResponsesRequestMap(reqBody map[string]any) bool {
 	}
 
 	if reasoning, ok := reqBody["reasoning"].(map[string]any); ok {
-		if sanitizeOpenAIResponsesReasoning(reasoning) {
+		if sanitizeOpenAIResponsesReasoning(reasoning, model) {
 			modified = true
 		}
 		if len(reasoning) == 0 {
@@ -328,7 +329,7 @@ func intValueFromAny(value any) (int, bool) {
 		return 0, false
 	}
 }
-func sanitizeOpenAIResponsesReasoning(reasoning map[string]any) bool {
+func sanitizeOpenAIResponsesReasoning(reasoning map[string]any, model string) bool {
 	modified := false
 	for key := range reasoning {
 		if _, ok := openAIResponsesReasoningAllowedKeys[key]; ok {
@@ -338,7 +339,7 @@ func sanitizeOpenAIResponsesReasoning(reasoning map[string]any) bool {
 		modified = true
 	}
 
-	effort := normalizeOpenAIResponsesReasoningEffort(stringValueFromAny(reasoning["effort"]))
+	effort := normalizeOpenAIResponsesReasoningEffort(stringValueFromAny(reasoning["effort"]), model)
 	if rawEffort, ok := reasoning["effort"]; ok {
 		if effort == "" {
 			delete(reasoning, "effort")
@@ -417,15 +418,8 @@ func sanitizeOpenAIResponsesToolChoice(value any) (any, bool, bool) {
 	}
 }
 
-func normalizeOpenAIResponsesReasoningEffort(effort string) string {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "minimal", "none":
-		return "none"
-	case "low", "medium", "high", "xhigh":
-		return strings.ToLower(strings.TrimSpace(effort))
-	default:
-		return ""
-	}
+func normalizeOpenAIResponsesReasoningEffort(effort, model string) string {
+	return normalizeOpenAIReasoningEffortForModel(effort, model)
 }
 
 func normalizeOpenAIResponsesReasoningSummary(summary string) string {

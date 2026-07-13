@@ -765,10 +765,6 @@ func parseUsageAndAccumulate(
 		outputResult = gjson.GetBytes(message, "response.usage.completion_tokens")
 	}
 	cachedResult := gjson.GetBytes(message, "response.usage.input_tokens_details.cached_tokens")
-	cacheCreationResult := gjson.GetBytes(message, "response.usage.input_tokens_details.cache_creation_input_tokens")
-	if !cacheCreationResult.Exists() {
-		cacheCreationResult = gjson.GetBytes(message, "response.usage.cache_creation_input_tokens")
-	}
 	if !cachedResult.Exists() {
 		cachedResult = gjson.GetBytes(message, "response.usage.prompt_tokens_details.cached_tokens")
 	}
@@ -780,20 +776,19 @@ func parseUsageAndAccumulate(
 	inputTokens, inputOK := parseUsageIntField(inputResult, true)
 	outputTokens, outputOK := parseUsageIntField(outputResult, true)
 	cachedTokens, cachedOK := parseUsageIntField(cachedResult, false)
-	cacheCreationTokens, cacheCreationOK := parseUsageIntField(cacheCreationResult, false)
-	if !inputOK || !outputOK || !cachedOK || !cacheCreationOK {
+	if !inputOK || !outputOK || !cachedOK {
 		recordUsageParseFailure()
 		if onParseFailure != nil {
 			onParseFailure(eventType, usageRaw)
 		}
-		// 解析失败时不做部分字段累加，避免计费 usage 出现”半有效”状态。
+		// 解析失败时不做部分字段累加，避免计费 usage 出现“半有效”状态。
 		return Usage{}
 	}
 	parsedUsage := Usage{
 		InputTokens:              inputTokens,
 		OutputTokens:             outputTokens,
+		CacheCreationInputTokens: openAICacheCreationTokensFromUsage(usageResult),
 		CacheReadInputTokens:     cachedTokens,
-		CacheCreationInputTokens: cacheCreationTokens,
 		ImageOutputTokens:        int(imageTokens),
 	}
 
@@ -813,6 +808,31 @@ func parseUsageIntField(value gjson.Result, required bool) (int, bool) {
 		return 0, false
 	}
 	return int(value.Int()), true
+}
+
+func openAICacheCreationTokensFromUsage(value gjson.Result) int {
+	for _, field := range []string{
+		"input_tokens_details.cache_write_tokens",
+		"prompt_tokens_details.cache_write_tokens",
+		"input_tokens_details.cache_creation_tokens",
+		"prompt_tokens_details.cache_creation_tokens",
+	} {
+		result := value.Get(field)
+		if result.Exists() {
+			return max(int(result.Int()), 0)
+		}
+	}
+	for _, field := range []string{
+		"cache_write_tokens",
+		"cache_creation_input_tokens",
+		"cache_write_input_tokens",
+		"cache_creation_tokens",
+	} {
+		if tokens := int(value.Get(field).Int()); tokens > 0 {
+			return tokens
+		}
+	}
+	return 0
 }
 
 func enrichResult(result *RelayResult, state *relayState, duration time.Duration) {
