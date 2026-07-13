@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,8 +17,37 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
+
+// stripOpenAIPromptCacheFields removes cache-control fields at every nesting
+// level. ChatGPT's internal endpoint reports the public prompt_cache_key as
+// prompt_cache_breakpoint, and large Responses payloads may carry the public
+// field in nested compatibility objects rather than only at the root.
+func stripOpenAIPromptCacheFields(body []byte) ([]byte, error) {
+	var value any
+	if err := json.Unmarshal(body, &value); err != nil {
+		return nil, err
+	}
+	stripOpenAIPromptCacheValue(value)
+	return json.Marshal(value)
+}
+
+func stripOpenAIPromptCacheValue(value any) {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			if key == "prompt_cache_key" || key == "prompt_cache_breakpoint" || key == "prompt_cache_retention" {
+				delete(current, key)
+				continue
+			}
+			stripOpenAIPromptCacheValue(child)
+		}
+	case []any:
+		for _, child := range current {
+			stripOpenAIPromptCacheValue(child)
+		}
+	}
+}
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
@@ -740,13 +770,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				account.Type == AccountTypeOAuth &&
 				resp.StatusCode == http.StatusBadRequest &&
 				upstreamParam == "prompt_cache_breakpoint" {
-				trimmedBody, trimErr := sjson.DeleteBytes(body, "prompt_cache_key")
+				trimmedBody, trimErr := stripOpenAIPromptCacheFields(body)
 				if trimErr != nil {
-					return nil, fmt.Errorf("strip prompt cache key retry body: %w", trimErr)
-				}
-				trimmedBody, trimErr = sjson.DeleteBytes(trimmedBody, "prompt_cache_breakpoint")
-				if trimErr != nil {
-					return nil, fmt.Errorf("strip prompt cache breakpoint retry body: %w", trimErr)
+					return nil, fmt.Errorf("strip prompt cache fields retry body: %w", trimErr)
 				}
 				httpPromptCacheBreakpointRetryTried = true
 				body = trimmedBody

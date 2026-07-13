@@ -2658,7 +2658,7 @@ func TestOpenAIForwardOAuthRetriesPromptCacheBreakpointWithoutCacheFields(t *tes
 	SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
 	// Use a model that normally supports prompt caching so this specifically
 	// exercises the error-driven fallback instead of GPT-5.6's proactive strip.
-	body := []byte(`{"model":"gpt-5.5","stream":false,"prompt_cache_key":"cache-key","prompt_cache_breakpoint":"legacy-key","input":"hello"}`)
+	body := []byte(`{"model":"gpt-5.5","stream":false,"prompt_cache_key":"cache-key","prompt_cache_breakpoint":"legacy-key","input":[{"type":"message","metadata":{"prompt_cache_key":"nested-key","prompt_cache_retention":"24h"},"content":"hello"}]}`)
 
 	result, err := svc.Forward(context.Background(), c, account, body)
 
@@ -2671,6 +2671,8 @@ func TestOpenAIForwardOAuthRetriesPromptCacheBreakpointWithoutCacheFields(t *tes
 	require.NotEmpty(t, upstream.requests[0].Header.Get("Conversation_Id"))
 	require.False(t, gjson.GetBytes(upstream.bodies[1], "prompt_cache_key").Exists())
 	require.False(t, gjson.GetBytes(upstream.bodies[1], "prompt_cache_breakpoint").Exists())
+	require.False(t, gjson.GetBytes(upstream.bodies[1], "input.0.metadata.prompt_cache_key").Exists())
+	require.False(t, gjson.GetBytes(upstream.bodies[1], "input.0.metadata.prompt_cache_retention").Exists())
 	require.Empty(t, upstream.requests[1].Header.Get("Session_Id"))
 	require.Empty(t, upstream.requests[1].Header.Get("Conversation_Id"))
 }
