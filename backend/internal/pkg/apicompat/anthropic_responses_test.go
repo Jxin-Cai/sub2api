@@ -593,6 +593,76 @@ func TestStreamingTextOnly(t *testing.T) {
 	assert.Equal(t, "message_stop", events[2].Type)
 }
 
+func TestResponsesEventToAnthropicEvents_EmitsTerminalText_WhenTextDeltaMissing(t *testing.T) {
+	// Arrange
+	state := NewResponsesEventToAnthropicState()
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type: "response.created",
+		Response: &ResponsesResponse{
+			ID:    "resp_compact_summary",
+			Model: "gpt-5.5",
+		},
+	}, state)
+
+	// Act
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type: "response.completed",
+		Response: &ResponsesResponse{
+			Status: "completed",
+			Output: []ResponsesOutput{{
+				Type: "message",
+				Role: "assistant",
+				Content: []ResponsesContentPart{{
+					Type: "output_text",
+					Text: "continuation summary",
+				}},
+			}},
+		},
+	}, state)
+
+	// Assert
+	textDeltas := make([]string, 0, 1)
+	for _, event := range events {
+		if event.Type == "content_block_delta" && event.Delta != nil && event.Delta.Type == "text_delta" {
+			textDeltas = append(textDeltas, event.Delta.Text)
+		}
+	}
+	require.Equal(t, []string{"continuation summary"}, textDeltas)
+}
+
+func TestResponsesEventToAnthropicEvents_DoesNotDuplicateTerminalText_WhenTextDeltaAlreadyEmitted(t *testing.T) {
+	// Arrange
+	state := NewResponsesEventToAnthropicState()
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:     "response.created",
+		Response: &ResponsesResponse{ID: "resp_normal", Model: "gpt-5.5"},
+	}, state)
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:  "response.output_text.delta",
+		Delta: "answer",
+	}, state)
+
+	// Act
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type: "response.completed",
+		Response: &ResponsesResponse{
+			Status: "completed",
+			Output: []ResponsesOutput{{
+				Type:    "message",
+				Role:    "assistant",
+				Content: []ResponsesContentPart{{Type: "output_text", Text: "answer"}},
+			}},
+		},
+	}, state)
+
+	// Assert
+	for _, event := range events {
+		if event.Type == "content_block_delta" && event.Delta != nil {
+			assert.NotEqual(t, "text_delta", event.Delta.Type)
+		}
+	}
+}
+
 func TestResponsesEventToAnthropicEvents_ResponseDone(t *testing.T) {
 	state := NewResponsesEventToAnthropicState()
 	state.Model = "gpt-4o"

@@ -286,6 +286,7 @@ type ResponsesEventToAnthropicState struct {
 	CurrentToolArgs     string
 	CurrentToolHadDelta bool
 	HasToolCall         bool
+	HasVisibleText      bool
 
 	HasReasoningDelta bool
 
@@ -609,6 +610,7 @@ func resToAnthHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	if evt.Delta == "" {
 		return nil
 	}
+	state.HasVisibleText = true
 
 	var events []AnthropicStreamEvent
 
@@ -848,6 +850,7 @@ func resToAnthHandleOutputTextDone(evt *ResponsesStreamEvent, state *ResponsesEv
 			},
 		})
 		state.BlockHasDelta[blockIdx] = true
+		state.HasVisibleText = true
 		return events
 	}
 	return nil
@@ -1034,6 +1037,15 @@ func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	}
 
 	var events []AnthropicStreamEvent
+	// Some Responses-compatible upstreams omit output_text delta/done events and
+	// only expose the completed assistant message in the terminal response. Backfill
+	// that text before message_stop so Anthropic clients do not observe a successful
+	// but empty response. Do not replay terminal output after any visible delta.
+	if !state.HasVisibleText {
+		for _, text := range terminalResponseVisibleTexts(evt.Response) {
+			events = append(events, resToAnthHandleTextDelta(&ResponsesStreamEvent{Delta: text}, state)...)
+		}
+	}
 	events = append(events, closeCurrentBlock(state)...)
 
 	stopReason := "end_turn"
@@ -1081,6 +1093,35 @@ func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	)
 	state.MessageStopSent = true
 	return events
+}
+
+func terminalResponseVisibleTexts(response *ResponsesResponse) []string {
+	if response == nil {
+		return nil
+	}
+	if strings.TrimSpace(response.OutputText) != "" {
+		return []string{response.OutputText}
+	}
+
+	texts := make([]string, 0, 1)
+	for _, item := range response.Output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, part := range item.Content {
+			switch part.Type {
+			case "output_text":
+				if strings.TrimSpace(part.Text) != "" {
+					texts = append(texts, part.Text)
+				}
+			case "refusal":
+				if strings.TrimSpace(part.Refusal) != "" {
+					texts = append(texts, part.Refusal)
+				}
+			}
+		}
+	}
+	return texts
 }
 
 func closeCurrentBlock(state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
