@@ -447,6 +447,41 @@ func (o ResponsesOutput) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// UnmarshalJSON accepts the object-form arguments emitted by Codex for
+// tool_search_call while retaining the string representation used internally.
+func (o *ResponsesOutput) UnmarshalJSON(data []byte) error {
+	type responsesOutputAlias ResponsesOutput
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var typ string
+	if value, ok := raw["type"]; ok {
+		if err := json.Unmarshal(value, &typ); err != nil {
+			return err
+		}
+	}
+	if typ == "tool_search_call" {
+		if arguments, ok := raw["arguments"]; ok && len(arguments) > 0 && arguments[0] != '"' {
+			encoded, err := json.Marshal(string(arguments))
+			if err != nil {
+				return err
+			}
+			raw["arguments"] = encoded
+			data, err = json.Marshal(raw)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	var alias responsesOutputAlias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+	*o = ResponsesOutput(alias)
+	return nil
+}
+
 // ResponsesOutputPart captures generic content-part events.
 type ResponsesOutputPart struct {
 	Type        string            `json:"type"`

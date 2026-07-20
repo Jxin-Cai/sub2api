@@ -56,10 +56,15 @@ type SystemSettings struct {
 	SMTPFromName           string `json:"smtp_from_name"`
 	SMTPUseTLS             bool   `json:"smtp_use_tls"`
 
-	TurnstileEnabled             bool   `json:"turnstile_enabled"`
-	TurnstileSiteKey             string `json:"turnstile_site_key"`
-	TurnstileSecretKeyConfigured bool   `json:"turnstile_secret_key_configured"`
-	APIKeyACLTrustForwardedIP    bool   `json:"api_key_acl_trust_forwarded_ip"`
+	TurnstileEnabled             bool     `json:"turnstile_enabled"`
+	TurnstileSiteKey             string   `json:"turnstile_site_key"`
+	TurnstileSecretKeyConfigured bool     `json:"turnstile_secret_key_configured"`
+	APIKeyACLTrustForwardedIP    bool     `json:"api_key_acl_trust_forwarded_ip"`
+	SessionBindingEnabled        bool     `json:"session_binding_enabled"`
+	StepUpEnabled                bool     `json:"step_up_enabled"`
+	AuditLogRetentionDays        int      `json:"audit_log_retention_days"`
+	ForwardedClientIPHeaders     []string `json:"forwarded_client_ip_headers"`
+	AdminRechargeRebateEnabled   bool     `json:"admin_recharge_rebate_enabled"`
 
 	LinuxDoConnectEnabled                bool   `json:"linuxdo_connect_enabled"`
 	LinuxDoConnectClientID               string `json:"linuxdo_connect_client_id"`
@@ -215,6 +220,8 @@ type SystemSettings struct {
 	PaymentVisibleMethodWxpayEnabled  bool   `json:"payment_visible_method_wxpay_enabled"`
 
 	// OpenAI account scheduling
+	OpenAILowUpstreamRatePriorityEnabled                   bool                      `json:"openai_low_upstream_rate_priority_enabled"`
+	OpenAIOAuthSchedulingRateMultiplier                    float64                   `json:"openai_oauth_scheduling_rate_multiplier"`
 	OpenAIAdvancedSchedulerEnabled                         bool                      `json:"openai_advanced_scheduler_enabled"`
 	OpenAIModelPriorityRules                               []OpenAIModelPriorityRule `json:"openai_model_priority_rules"`
 	OpenAIAdvancedSchedulerStickyWeightedEnabled           bool                      `json:"openai_advanced_scheduler_sticky_weighted_enabled"`
@@ -227,6 +234,7 @@ type SystemSettings struct {
 	OpenAIAdvancedSchedulerWeightTTFT                      string                    `json:"openai_advanced_scheduler_weight_ttft"`
 	OpenAIAdvancedSchedulerWeightReset                     string                    `json:"openai_advanced_scheduler_weight_reset"`
 	OpenAIAdvancedSchedulerWeightQuotaHeadroom             string                    `json:"openai_advanced_scheduler_weight_quota_headroom"`
+	OpenAIAdvancedSchedulerWeightUpstreamCost              string                    `json:"openai_advanced_scheduler_weight_upstream_cost"`
 	OpenAIAdvancedSchedulerWeightPreviousResponse          string                    `json:"openai_advanced_scheduler_weight_previous_response"`
 	OpenAIAdvancedSchedulerWeightSessionSticky             string                    `json:"openai_advanced_scheduler_weight_session_sticky"`
 	OpenAIAdvancedSchedulerEffectiveLBTopK                 string                    `json:"openai_advanced_scheduler_effective_lb_top_k"`
@@ -237,6 +245,7 @@ type SystemSettings struct {
 	OpenAIAdvancedSchedulerEffectiveWeightTTFT             string                    `json:"openai_advanced_scheduler_effective_weight_ttft"`
 	OpenAIAdvancedSchedulerEffectiveWeightReset            string                    `json:"openai_advanced_scheduler_effective_weight_reset"`
 	OpenAIAdvancedSchedulerEffectiveWeightQuotaHeadroom    string                    `json:"openai_advanced_scheduler_effective_weight_quota_headroom"`
+	OpenAIAdvancedSchedulerEffectiveWeightUpstreamCost     string                    `json:"openai_advanced_scheduler_effective_weight_upstream_cost"`
 	OpenAIAdvancedSchedulerEffectiveWeightPreviousResponse string                    `json:"openai_advanced_scheduler_effective_weight_previous_response"`
 	OpenAIAdvancedSchedulerEffectiveWeightSessionSticky    string                    `json:"openai_advanced_scheduler_effective_weight_session_sticky"`
 

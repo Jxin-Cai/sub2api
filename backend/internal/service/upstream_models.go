@@ -376,7 +376,11 @@ func (s *AccountTestService) fetchOpenAICodexUpstreamModels(ctx context.Context,
 		return nil, newUpstreamModelSyncConfigError("No OpenAI Codex access token is available", nil)
 	}
 
-	manifest, err := fetchCodexModelsManifest(ctx, s.accountRepo, account, "", "")
+	manifest, err := fetchCodexModelsManifest(ctx, &OpenAIGatewayService{
+		accountRepo:  s.accountRepo,
+		httpUpstream: s.httpUpstream,
+		cfg:          s.cfg,
+	}, account, "", "")
 	if err != nil {
 		return nil, newUpstreamModelSyncUpstreamError(
 			"Failed to request OpenAI Codex models manifest",

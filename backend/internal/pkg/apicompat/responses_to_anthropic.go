@@ -298,6 +298,7 @@ type ResponsesEventToAnthropicState struct {
 
 	// FuncCallWhitespaceCount tracks consecutive whitespace chars per output_index.
 	FuncCallWhitespaceCount map[int]int
+	FuncCallArgs            map[int]string
 
 	InputTokens              int
 	OutputTokens             int
@@ -314,6 +315,7 @@ func NewResponsesEventToAnthropicState() *ResponsesEventToAnthropicState {
 	return &ResponsesEventToAnthropicState{
 		OutputIndexToBlockIdx:   make(map[int]int),
 		FuncCallWhitespaceCount: make(map[int]int),
+		FuncCallArgs:            make(map[int]string),
 		BlockHasDelta:           make(map[int]bool),
 		Created:                 time.Now().Unix(),
 	}
@@ -651,10 +653,6 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 		return nil
 	}
 
-	if state.CurrentBlockType == "tool_use" {
-		state.CurrentToolHadDelta = true
-	}
-
 	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
 	if !ok {
 		return nil
@@ -683,7 +681,28 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 		}
 	}
 	state.FuncCallWhitespaceCount[evt.OutputIndex] = count
+	state.FuncCallArgs[evt.OutputIndex] += evt.Delta
 
+	if state.CurrentToolName == "Read" && state.ContentBlockOpen && state.ContentBlockIndex == blockIdx {
+		if !json.Valid([]byte(state.FuncCallArgs[evt.OutputIndex])) {
+			return nil
+		}
+		state.CurrentToolArgs = state.FuncCallArgs[evt.OutputIndex]
+		state.CurrentToolHadDelta = true
+		state.BlockHasDelta[blockIdx] = true
+		return []AnthropicStreamEvent{{
+			Type:  "content_block_delta",
+			Index: &blockIdx,
+			Delta: &AnthropicDelta{
+				Type:        "input_json_delta",
+				PartialJSON: string(sanitizeAnthropicToolUseInput("Read", state.CurrentToolArgs)),
+			},
+		}}
+	}
+
+	if state.ContentBlockIndex == blockIdx && state.CurrentBlockType == "tool_use" {
+		state.CurrentToolHadDelta = true
+	}
 	state.BlockHasDelta[blockIdx] = true
 	return []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
@@ -696,35 +715,38 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 }
 
 func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
-	if state.CurrentBlockType != "tool_use" {
-		return resToAnthHandleBlockDone(state)
+	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	if !ok {
+		return nil
 	}
 
 	raw := evt.Arguments
 	if raw == "" {
-		raw = state.CurrentToolArgs
+		raw = state.FuncCallArgs[evt.OutputIndex]
 	}
-	if raw == "" || state.CurrentToolHadDelta {
-		return closeCurrentBlock(state)
-	}
-	if state.CurrentToolName == "Read" {
-		sanitized := sanitizeAnthropicToolUseInput(state.CurrentToolName, raw)
-		if len(sanitized) == 0 {
+	isCurrentBlock := state.ContentBlockOpen && state.ContentBlockIndex == blockIdx && state.CurrentBlockType == "tool_use"
+	if raw == "" || state.BlockHasDelta[blockIdx] {
+		if isCurrentBlock {
 			return closeCurrentBlock(state)
 		}
-		raw = string(sanitized)
+		return nil
+	}
+	if isCurrentBlock && state.CurrentToolName == "Read" {
+		raw = string(sanitizeAnthropicToolUseInput("Read", raw))
 	}
 
-	idx := state.ContentBlockIndex
 	events := []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
-		Index: &idx,
+		Index: &blockIdx,
 		Delta: &AnthropicDelta{
 			Type:        "input_json_delta",
 			PartialJSON: raw,
 		},
 	}}
-	events = append(events, closeCurrentBlock(state)...)
+	state.BlockHasDelta[blockIdx] = true
+	if isCurrentBlock {
+		events = append(events, closeCurrentBlock(state)...)
+	}
 	return events
 }
 

@@ -146,7 +146,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		reasoningEffort := extractOpenAIReasoningEffortFromBody(body, mappedModel)
 		// 国产模型默认 effort 补充：也要用 mappedModel 判定是否是 passback-required 上游。
 		reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, mappedModel)
-		return s.forwardOpenAIPassthrough(ctx, c, account, originalBody, reqModel, reasoningEffort, reqStream, startTime)
+		return s.forwardOpenAIPassthrough(ctx, c, account, originalBody, originalBody, reqModel, false, reasoningEffort, reqStream, startTime)
 	}
 
 	bodyModified := false
@@ -524,6 +524,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		var wsResult *OpenAIForwardResult
 		var wsErr error
 		wsLastFailureReason := ""
+		wsAgentTaskRecoveryTried := false
 		wsPrevResponseRecoveryTried := false
 		wsInvalidEncryptedContentRecoveryTried := false
 		recoverPrevResponseNotFound := func(attempt int) bool {
@@ -608,6 +609,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				startTime,
 				attempt,
 				wsLastFailureReason,
+				&wsAgentTaskRecoveryTried,
 			)
 			if wsErr == nil {
 				break
@@ -930,10 +932,10 @@ func (s *OpenAIGatewayService) RetrieveResponse(ctx context.Context, c *gin.Cont
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		if shouldFailoverOpenAIPassthroughResponse(resp.StatusCode) {
-			return nil, s.handleFailoverErrorResponsePassthrough(ctx, resp, c, account, nil)
+		if shouldFailoverOpenAIPassthroughResponse(account, resp.StatusCode, nil) {
+			return nil, s.handleFailoverErrorResponsePassthrough(ctx, resp, c, account, nil, nil)
 		}
-		return nil, s.handleErrorResponsePassthrough(ctx, resp, c, account, nil)
+		return nil, s.handleErrorResponsePassthrough(ctx, resp, c, account, nil, nil)
 	}
 
 	var usage *OpenAIUsage
