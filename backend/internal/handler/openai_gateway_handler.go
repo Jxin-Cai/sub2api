@@ -824,7 +824,7 @@ func (h *OpenAIGatewayHandler) handleResponsesRetrieve(
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
-				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
+				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, "", false, nil)
 				h.gatewayService.RecordOpenAIAccountSwitch()
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr
@@ -841,7 +841,7 @@ func (h *OpenAIGatewayHandler) handleResponsesRetrieve(
 				)
 				continue
 			}
-			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, false, nil)
+			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, "", false, nil)
 			wroteFallback := h.ensureForwardErrorResponse(c, streamStarted)
 			fields := []zap.Field{
 				zap.Int64("account_id", account.ID),
@@ -860,9 +860,9 @@ func (h *OpenAIGatewayHandler) handleResponsesRetrieve(
 			if account.Type == service.AccountTypeOAuth {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)
 			}
-			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
+			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, "", true, result.FirstTokenMs)
 		} else {
-			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, nil)
+			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, "", true, nil)
 		}
 		reqLog.Debug("openai.retrieve_completed",
 			zap.Int64("account_id", account.ID),
