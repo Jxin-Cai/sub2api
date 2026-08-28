@@ -986,6 +986,7 @@ import { useClipboard } from '@/composables/useClipboard'
 import { useSwipeSelect } from '@/composables/useSwipeSelect'
 import { useTableSelection } from '@/composables/useTableSelection'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
+import { BULK_FETCH_PAGE_SIZE } from '@/utils/tablePreferences'
 import { formatDateTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 
@@ -1792,7 +1793,7 @@ const qualityTargetLabel = (target: string) => {
 }
 
 const fetchAllProxiesForBatch = async (): Promise<Proxy[]> => {
-  const pageSize = 200
+  const pageSize = BULK_FETCH_PAGE_SIZE
   const result: Proxy[] = []
   let page = 1
   let totalPages = 1

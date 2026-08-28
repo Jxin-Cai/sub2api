@@ -1,8 +1,9 @@
 const MIN_TABLE_PAGE_SIZE = 5
-const MAX_TABLE_PAGE_SIZE = 1000
+export const MAX_TABLE_PAGE_SIZE = 1000
 
 export const DEFAULT_TABLE_PAGE_SIZE = 20
-export const DEFAULT_TABLE_PAGE_SIZE_OPTIONS = [10, 20, 50, 100]
+export const DEFAULT_TABLE_PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500, 1000]
+export const BULK_FETCH_PAGE_SIZE = MAX_TABLE_PAGE_SIZE
 
 const sanitizePageSize = (value: unknown): number | null => {
   const size = Number(value)

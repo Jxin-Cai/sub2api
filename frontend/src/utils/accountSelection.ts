@@ -1,3 +1,5 @@
+import { BULK_FETCH_PAGE_SIZE } from '@/utils/tablePreferences'
+
 interface AccountIDRow {
   id: number
 }
@@ -14,7 +16,7 @@ type AccountPageFetcher = (
   filters: Record<string, unknown>
 ) => Promise<AccountListPage>
 
-const SELECT_ALL_PAGE_SIZE = 1000
+const SELECT_ALL_PAGE_SIZE = BULK_FETCH_PAGE_SIZE
 
 export async function fetchAllAccountIds(
   fetchPage: AccountPageFetcher,

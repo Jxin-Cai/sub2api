@@ -13,6 +13,7 @@ import {
   type ReleaseInfo
 } from '@/api/admin/system'
 import { getPublicSettings as fetchPublicSettingsAPI } from '@/api/auth'
+import { DEFAULT_TABLE_PAGE_SIZE, DEFAULT_TABLE_PAGE_SIZE_OPTIONS } from '@/utils/tablePreferences'
 
 export const useAppStore = defineStore('app', () => {
   // ==================== State ====================
@@ -349,8 +350,8 @@ export const useAppStore = defineStore('app', () => {
         compact_home_enabled: false,
         hide_ccs_import_button: false,
         payment_enabled: false,
-        table_default_page_size: 20,
-        table_page_size_options: [10, 20, 50, 100],
+        table_default_page_size: DEFAULT_TABLE_PAGE_SIZE,
+        table_page_size_options: [...DEFAULT_TABLE_PAGE_SIZE_OPTIONS],
         custom_menu_items: [],
         custom_endpoints: [],
         linuxdo_oauth_enabled: false,

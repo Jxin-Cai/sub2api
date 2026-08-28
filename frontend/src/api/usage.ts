@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from './client'
+import { BULK_FETCH_PAGE_SIZE } from '@/utils/tablePreferences'
 import type {
   UsageLog,
   UsageQueryParams,
@@ -227,7 +228,7 @@ export async function getByDateRange(
     start_date: startDate,
     end_date: endDate,
     page: 1,
-    page_size: 100
+    page_size: BULK_FETCH_PAGE_SIZE
   }
 
   if (apiKeyId !== undefined) {
