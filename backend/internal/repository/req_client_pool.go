@@ -58,6 +58,11 @@ func getSharedReqClient(opts reqClientOptions) (*req.Client, error) {
 	}
 	if trimmed != "" {
 		client.SetProxyURL(trimmed)
+	} else {
+		// An empty account proxy means direct connection. Explicitly clear the
+		// transport proxy so HTTP_PROXY/HTTPS_PROXY from the server environment
+		// cannot route OAuth requests through an unrelated local proxy.
+		client.SetProxy(nil)
 	}
 	client = instrumentReqClient(client)
 

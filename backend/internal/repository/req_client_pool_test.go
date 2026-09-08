@@ -88,6 +88,37 @@ func TestGetSharedReqClient_ImpersonateAndProxy(t *testing.T) {
 	require.Equal(t, "http://proxy.local:8080|4s|true|false", buildReqClientKey(opts))
 }
 
+func TestGetSharedReqClient_DirectConnectionIgnoresEnvironmentProxy(t *testing.T) {
+	sharedReqClients = sync.Map{}
+
+	var proxyRequests, targetRequests int
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyRequests++
+		http.Error(w, "unexpected proxy request", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	t.Setenv("https_proxy", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetRequests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	client, err := getSharedReqClient(reqClientOptions{Timeout: time.Second})
+	require.NoError(t, err)
+	resp, err := client.R().Get(target.URL)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, 1, targetRequests)
+	require.Equal(t, 0, proxyRequests)
+}
+
 func TestGetSharedReqClient_InvalidProxyURL(t *testing.T) {
 	sharedReqClients = sync.Map{}
 	opts := reqClientOptions{
