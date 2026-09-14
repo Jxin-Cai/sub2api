@@ -184,7 +184,7 @@ func sanitizeUpdateGroupRequestForSimpleMode(req *UpdateGroupRequest) {
 type CreateGroupRequest struct {
 	Name                      string                        `json:"name" binding:"required"`
 	Description               string                        `json:"description"`
-	Platform                  string                        `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek composite"`
+	Platform                  string                        `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek minimax opencode_go composite"`
 	RateMultiplier            float64                       `json:"rate_multiplier"`
 	IsExclusive               bool                          `json:"is_exclusive"`
 	SubscriptionType          string                        `json:"subscription_type" binding:"omitempty,oneof=standard subscription"`
@@ -239,7 +239,7 @@ type CreateGroupRequest struct {
 	RequirePrivacySet           bool                                      `json:"require_privacy_set"`
 	DefaultMappedModel          string                                    `json:"default_mapped_model"`
 	MessagesDispatchModelConfig service.OpenAIMessagesDispatchModelConfig `json:"messages_dispatch_model_config"`
-	ModelsListConfig            service.GroupModelsListConfig             `json:"models_list_config"`
+	ModelAllowlist              service.GroupModelAllowlist               `json:"model_allowlist"`
 	// 固定账号 manifest 配置；创建路径禁止开启，仅编辑可配置。
 	CodexModelsManifestConfig service.GroupCodexModelsManifestConfig `json:"codex_models_manifest_config"`
 	// 分组 RPM 上限（0 = 不限制）
@@ -258,7 +258,7 @@ type CreateGroupRequest struct {
 type UpdateGroupRequest struct {
 	Name                      string                         `json:"name"`
 	Description               *string                        `json:"description"`
-	Platform                  string                         `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek composite"`
+	Platform                  string                         `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek minimax opencode_go composite"`
 	RateMultiplier            *float64                       `json:"rate_multiplier"`
 	IsExclusive               *bool                          `json:"is_exclusive"`
 	Status                    string                         `json:"status" binding:"omitempty,oneof=active inactive"`
@@ -314,7 +314,7 @@ type UpdateGroupRequest struct {
 	RequirePrivacySet           *bool                                      `json:"require_privacy_set"`
 	DefaultMappedModel          *string                                    `json:"default_mapped_model"`
 	MessagesDispatchModelConfig *service.OpenAIMessagesDispatchModelConfig `json:"messages_dispatch_model_config"`
-	ModelsListConfig            *service.GroupModelsListConfig             `json:"models_list_config"`
+	ModelAllowlist              *service.GroupModelAllowlist               `json:"model_allowlist"`
 	// 固定账号 manifest 配置；nil 表示不修改。
 	CodexModelsManifestConfig *service.GroupCodexModelsManifestConfig `json:"codex_models_manifest_config"`
 	// 分组 RPM 上限（0 = 不限制）；nil 表示未提供不改动
@@ -332,7 +332,7 @@ type UpdateGroupRequest struct {
 type CompositeRouteRequest struct {
 	PublicModel    string `json:"public_model" binding:"required"`
 	MatchType      string `json:"match_type" binding:"omitempty,oneof=exact prefix"`
-	TargetPlatform string `json:"target_platform" binding:"required,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek"`
+	TargetPlatform string `json:"target_platform" binding:"required,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek minimax opencode_go"`
 	UpstreamModel  string `json:"upstream_model"`
 	Endpoint       string `json:"endpoint" binding:"omitempty,oneof=any messages count_tokens responses chat_completions embeddings images gemini"`
 	Priority       int    `json:"priority"`
@@ -605,9 +605,9 @@ func (h *GroupHandler) GetByID(c *gin.Context) {
 	response.Success(c, dto.GroupFromServiceAdmin(group))
 }
 
-// GetModelsListCandidates handles getting candidate model IDs for custom /v1/models list.
-// GET /api/v1/admin/groups/:id/models-list-candidates
-func (h *GroupHandler) GetModelsListCandidates(c *gin.Context) {
+// GetGroupModelAllowlistCandidates handles getting candidate model IDs for the group model allowlist.
+// GET /api/v1/admin/groups/:id/model-allowlist-candidates
+func (h *GroupHandler) GetGroupModelAllowlistCandidates(c *gin.Context) {
 	if h.rejectUnsupportedSimpleModeOperation(c, "advanced") {
 		return
 	}
@@ -715,7 +715,7 @@ func (h *GroupHandler) Create(c *gin.Context) {
 		RequirePrivacySet:               req.RequirePrivacySet,
 		DefaultMappedModel:              req.DefaultMappedModel,
 		MessagesDispatchModelConfig:     req.MessagesDispatchModelConfig,
-		ModelsListConfig:                req.ModelsListConfig,
+		ModelAllowlist:                  req.ModelAllowlist,
 		CodexModelsManifestConfig:       req.CodexModelsManifestConfig,
 		RPMLimit:                        req.RPMLimit,
 		MaxReasoningEffort:              req.MaxReasoningEffort,
@@ -861,7 +861,7 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		RequirePrivacySet:               req.RequirePrivacySet,
 		DefaultMappedModel:              req.DefaultMappedModel,
 		MessagesDispatchModelConfig:     req.MessagesDispatchModelConfig,
-		ModelsListConfig:                req.ModelsListConfig,
+		ModelAllowlist:                  req.ModelAllowlist,
 		CodexModelsManifestConfig:       req.CodexModelsManifestConfig,
 		RPMLimit:                        req.RPMLimit,
 		MaxReasoningEffort:              req.MaxReasoningEffort,
