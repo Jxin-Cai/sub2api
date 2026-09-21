@@ -490,6 +490,8 @@ func TestGatewayModels_Grok46AdvertisesXHighReasoningEffortForGrokBuild(t *testi
 	}{
 		{groupID: 4410, model: "grok-4.6"},
 		{groupID: 4411, model: "grok-4.6-latest"},
+		{groupID: 4412, model: "grok-4.7"},
+		{groupID: 4413, model: "grok-4.7-latest"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
