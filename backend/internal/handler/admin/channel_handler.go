@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -662,6 +663,16 @@ func (h *ChannelHandler) SyncPricingModels(c *gin.Context) {
 			fmt.Sprintf("unsupported platform: %s", platform)).
 			WithMetadata(map[string]string{"param": "platform"}))
 		return
+	}
+
+	// Refresh before listing. The in-memory catalog is a cached remote snapshot
+	// and can lag the published model list (for example gpt-6.1-sol) until the
+	// next scheduled hash check. A refresh failure still returns the current
+	// catalog so a transient upstream error does not blank the picker.
+	if h.pricingService != nil {
+		if err := h.pricingService.EnsureRemotePricingCurrent(); err != nil {
+			logger.LegacyPrintf("handler.channel", "[Channel] pricing refresh before model sync failed: %v", err)
+		}
 	}
 
 	models := h.pricingService.ListModelNamesByProvider(provider)

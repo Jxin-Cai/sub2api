@@ -160,14 +160,21 @@ func TestPricingHotReload_DeletedFileDropsItsLayer(t *testing.T) {
 	require.NotNil(t, svc.pricingData["custom-a"], "文件重新出现即恢复")
 }
 
-type stubPricingRemoteClient struct{ body string }
+type stubPricingRemoteClient struct {
+	body    string
+	hash    string
+	hashErr error
+}
 
 func (c stubPricingRemoteClient) FetchPricingJSON(context.Context, string) ([]byte, error) {
 	return []byte(c.body), nil
 }
 
 func (c stubPricingRemoteClient) FetchHashText(context.Context, string) (string, error) {
-	return "", nil
+	if c.hashErr != nil {
+		return "", c.hashErr
+	}
+	return c.hash, nil
 }
 
 // 远程下载重建后指纹必须同步到当前文件内容，否则下一轮定时比对会多做一次无意义重载。
@@ -214,4 +221,54 @@ func TestPricingSchedulerStartsForCustomFilesWithoutRemoteURL(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("scheduler must exit after Stop")
 	}
+}
+
+func TestEnsureRemotePricingCurrent_RefreshesStaleCatalog(t *testing.T) {
+	svc := newHotReloadPricingService(t, "", "")
+	svc.cfg.Pricing.RemoteURL = "https://example.com/pricing.json"
+	svc.cfg.Pricing.HashURL = "https://example.com/pricing.sha256"
+	svc.localHash = "stale"
+	svc.remoteClient = stubPricingRemoteClient{
+		body: `{
+			"gpt-6.1-sol": {"litellm_provider": "openai", "mode": "chat", "input_cost_per_token": 2e-06, "output_cost_per_token": 1e-05},
+			"gpt-6-sol": {"litellm_provider": "openai", "mode": "chat", "input_cost_per_token": 2e-06, "output_cost_per_token": 1e-05}
+		}`,
+		hash: "fresh",
+	}
+
+	require.NoError(t, svc.EnsureRemotePricingCurrent())
+
+	require.Contains(t, svc.ListModelNamesByProvider("openai"), "gpt-6.1-sol")
+	require.Equal(t, "fresh", svc.localHash)
+}
+
+func TestEnsureRemotePricingCurrent_SkipsDownloadWhenHashMatches(t *testing.T) {
+	svc := newHotReloadPricingService(t, "", "")
+	svc.cfg.Pricing.RemoteURL = "https://example.com/pricing.json"
+	svc.cfg.Pricing.HashURL = "https://example.com/pricing.sha256"
+	svc.localHash = "same"
+	svc.remoteClient = stubPricingRemoteClient{
+		body: `{"should-not-load": {"litellm_provider": "openai", "mode": "chat", "input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06}}`,
+		hash: "same",
+	}
+
+	require.NoError(t, svc.EnsureRemotePricingCurrent())
+
+	require.NotContains(t, svc.ListModelNamesByProvider("openai"), "should-not-load")
+	require.Contains(t, svc.pricingData, "remote-model")
+}
+
+func TestEnsureRemotePricingCurrent_DownloadsWhenHashFetchFails(t *testing.T) {
+	svc := newHotReloadPricingService(t, "", "")
+	svc.cfg.Pricing.RemoteURL = "https://example.com/pricing.json"
+	svc.cfg.Pricing.HashURL = "https://example.com/pricing.sha256"
+	svc.localHash = "stale"
+	svc.remoteClient = stubPricingRemoteClient{
+		body:    `{"gpt-6.1-sol": {"litellm_provider": "openai", "mode": "chat", "input_cost_per_token": 2e-06, "output_cost_per_token": 1e-05}}`,
+		hashErr: os.ErrClosed,
+	}
+
+	require.NoError(t, svc.EnsureRemotePricingCurrent())
+
+	require.Contains(t, svc.ListModelNamesByProvider("openai"), "gpt-6.1-sol")
 }

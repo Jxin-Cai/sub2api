@@ -1696,6 +1696,29 @@ func (s *PricingService) ForceUpdate() error {
 	return s.downloadPricingData()
 }
 
+// EnsureRemotePricingCurrent refreshes the in-memory catalog when the remote
+// hash differs from the last sync anchor. A missing hash URL, or a hash fetch
+// failure, falls back to a full download so a stale local cache cannot hide
+// models that the remote catalog already publishes. Callers that only need a
+// best-effort refresh should log the error and keep serving the current data.
+func (s *PricingService) EnsureRemotePricingCurrent() error {
+	if s == nil || s.cfg == nil || strings.TrimSpace(s.cfg.Pricing.RemoteURL) == "" {
+		return nil
+	}
+	if strings.TrimSpace(s.cfg.Pricing.HashURL) != "" {
+		remoteHash, err := s.fetchRemoteHash()
+		if err == nil {
+			s.mu.RLock()
+			localHash := s.localHash
+			s.mu.RUnlock()
+			if localHash != "" && strings.EqualFold(localHash, strings.TrimSpace(remoteHash)) {
+				return nil
+			}
+		}
+	}
+	return s.downloadPricingData()
+}
+
 // getPricingFilePath 获取价格文件路径
 func (s *PricingService) getPricingFilePath() string {
 	return filepath.Join(s.cfg.Pricing.DataDir, "model_pricing.json")
