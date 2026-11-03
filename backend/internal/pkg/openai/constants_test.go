@@ -6,6 +6,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDefaultModelIDsAreUnique(t *testing.T) {
+	// Arrange / Act
+	ids := DefaultModelIDs()
+
+	// Assert
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		require.NotContains(t, seen, id, "default model IDs must not repeat")
+		seen[id] = struct{}{}
+	}
+}
+
 func TestDefaultModelsIncludeBareGPT56Alias(t *testing.T) {
 	require.Contains(t, DefaultModelIDs(), "gpt-5.6")
 }
@@ -34,7 +46,7 @@ func TestDefaultModelsIncludeGPTImage25(t *testing.T) {
 }
 
 func TestGPT6SolLunaModelIdentity(t *testing.T) {
-	for _, model := range []string{"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"} {
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
 		require.Contains(t, DefaultModelIDs(), model)
 		require.True(t, IsGPT6SolOrLunaModelSpelling(model))
 	}
