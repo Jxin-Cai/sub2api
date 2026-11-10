@@ -761,3 +761,49 @@ Copyright (c) 2026 Wesley Liddick
 **このプロジェクトが役に立ったら、ぜひスターをお願いします！**
 
 </div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+R1 
+1. 查询用户所有工作中 session （teams + 个人空间的所有 session）
+2. 堆积 200ms 的用户输入，拿输入集去和 session list 做决策。看，有哪些是路由，哪些要新建 session。 （带上 super 对话的长期记忆一起做决策）
+3. 分发请求
+
+（仅work 需要了解的信息。 不包含其他 work 要了解的信息，哪怕只是状态）
+
+R2
+
+1. 查询用户所有工作中 session（包含 R1创建的新会话）
+2. 堆积 200ms 的用户输入，拿输入集去和 session list 做决策。看，有哪些是路由，哪些要新建 session。
+3. 分发请求
+
+
+
+用户 1 .session 1 + 消息 1
+用户 1 .session 1 + 消息 2
+用户 2 .session 2 + 消息 1
+
+（R1 & R2） redis 200ms 队列 sets (by 用户)
+
+R1 pop 100  ->
+R2 pop 100  ->
+
+
+团队中。两人说的 
